@@ -2,19 +2,10 @@
 
 本仓库实现「视觉侧 nnU-Net 保持高分辨率（28×28）+ Vim 桥接 + 预训练 Mamba-2 不从头训练」的医学视觉-语言架构，面向 `d:\nnunet_*` 与 `d:\unn-net` 数据与权重。
 
-## 创新点（论文图）
+## 创新点
 
 - **Llama / Attention VLM**：受 O(L²) 限制，视觉特征被压成 **14×14**。
 - **本方案（Mamba）**：O(L) 线性复杂度，保留 **28×28** 甚至更高分辨率特征。
-
-生成对比图：
-
-```powershell
-cd d:\mamba
-python scripts/plot_llama_vs_mamba_resolution.py
-```
-
-输出：`scripts/fig_llama_vs_mamba_resolution.png`（可用于论文/顶刊图）。
 
 ## 架构概览
 

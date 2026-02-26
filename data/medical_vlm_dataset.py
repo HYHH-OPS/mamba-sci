@@ -222,6 +222,7 @@ class MedicalVLMDataset(Dataset):
             "question": question,
             "answer": answer,
             "image_path": path,
+            "mask_path": mask_path,
         }
 
 

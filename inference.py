@@ -27,6 +27,10 @@ import torch
 import numpy as np
 
 from data.medical_vlm_dataset import load_paths_config
+from vision.nodule_contour import (
+    generate_nodule_contour_outputs,
+    load_slice_with_optional_mask,
+)
 
 try:
     from transformers.generation.stopping_criteria import StoppingCriteria, StoppingCriteriaList
@@ -221,33 +225,24 @@ def _normalize_template_output(text: str) -> str:
 
 
 # 与 dataset 一致的 2D 加载
-def _load_nifti_slice(path: str, slice_axis: int = 0, slice_idx: int | None = None) -> np.ndarray:
+def _load_nifti_slice(
+    path: str,
+    slice_axis: int = 0,
+    slice_idx: int | None = None,
+    mask_path: str | None = None,
+) -> np.ndarray:
     path = str(path).strip()
     if path in ("...", ".", "..") or not (path.endswith(".nii.gz") or path.endswith(".nii")):
         raise ValueError(
             f'无效的图像路径 "{path}"。请传入真实的 NIfTI 文件路径（.nii 或 .nii.gz），'
             '或省略 --image 从验证集取图。'
         )
-    try:
-        import SimpleITK as sitk
-        img = sitk.ReadImage(path)
-        arr = sitk.GetArrayFromImage(img)
-    except Exception:
-        import nibabel as nib
-        img = nib.load(path)
-        arr = np.asarray(img.dataobj)
-    if arr.ndim == 2:
-        return arr.astype(np.float32)
-    if arr.ndim == 3:
-        i = slice_idx if slice_idx is not None else arr.shape[slice_axis] // 2
-        if slice_axis == 0:
-            out = arr[i, :, :]
-        elif slice_axis == 1:
-            out = arr[:, i, :]
-        else:
-            out = arr[:, :, i]
-        return out.astype(np.float32)
-    raise ValueError(f"Unsupported ndim={arr.ndim}")
+    return load_slice_with_optional_mask(
+        path,
+        mask_path=mask_path,
+        slice_axis=slice_axis,
+        slice_idx=slice_idx,
+    )
 
 def _resize_to_patch(arr: np.ndarray, patch_size: int = 512) -> torch.Tensor:
     if arr.shape[0] != patch_size or arr.shape[1] != patch_size:
@@ -261,8 +256,12 @@ def _resize_to_patch(arr: np.ndarray, patch_size: int = 512) -> torch.Tensor:
         arr = np.zeros_like(arr)
     return torch.from_numpy(arr).float().unsqueeze(0).unsqueeze(0)  # [1, 1, H, W]
 
-def load_image_tensor(image_path: str, patch_size: int = 512) -> torch.Tensor:
-    arr = _load_nifti_slice(image_path)
+def load_image_tensor(
+    image_path: str,
+    patch_size: int = 512,
+    mask_path: str | None = None,
+) -> torch.Tensor:
+    arr = _load_nifti_slice(image_path, mask_path=mask_path)
     return _resize_to_patch(arr, patch_size)
 
 
@@ -447,6 +446,11 @@ def generate_from_image(
 def main():
     parser = argparse.ArgumentParser(description="医学 VLM 图像→文本生成")
     parser.add_argument("--image", type=str, default=None, help="NIfTI 图像路径")
+    parser.add_argument("--mask", type=str, default=None, help="NIfTI mask 路径（用于病灶层面选择与结节勾画）")
+    parser.add_argument("--draw_nodule_contour", action="store_true", help="输出结节勾画图和结节统计 CSV（需配合 --mask）")
+    parser.add_argument("--nodule_output_subdir", type=str, default="nodule_contour", help="勾画结果输出到 run_dir 下的子目录名")
+    parser.add_argument("--nodule_line_width", type=float, default=1.8, help="勾画轮廓线宽")
+    parser.add_argument("--nodule_fill_alpha", type=float, default=0.22, help="勾画区域填充透明度")
     parser.add_argument("--val_sample", action="store_true", help="从验证集抽几条跑生成")
     parser.add_argument("--checkpoint", type=str, default=None, help="vision_bridge 权重，默认 outputs/vision_bridge_best_val.pt 或 vision_bridge_final.pt")
     parser.add_argument("--mamba_model", type=str, default="state-spaces/mamba-2.8b-hf", help="Mamba 预训练模型")
@@ -543,7 +547,33 @@ def main():
             print(f"参考: {answer_gt[:200]}...")
             (run_dir / f"sample_{idx+1}_gen.txt").write_text(gen, encoding="utf-8")
             (run_dir / f"sample_{idx+1}_ref.txt").write_text(answer_gt, encoding="utf-8")
-            meta_list.append({"idx": idx + 1, "image_path": sample.get("image_path"), "prompt": prompt.strip()})
+            sample_meta = {
+                "idx": idx + 1,
+                "image_path": sample.get("image_path"),
+                "mask_path": sample.get("mask_path"),
+                "prompt": prompt.strip(),
+            }
+            if args.draw_nodule_contour:
+                sample_img = sample.get("image_path")
+                sample_mask = sample.get("mask_path")
+                if sample_img and sample_mask and Path(sample_img).exists() and Path(sample_mask).exists():
+                    try:
+                        contour_out = run_dir / f"sample_{idx+1}_{args.nodule_output_subdir}"
+                        contour_info = generate_nodule_contour_outputs(
+                            sample_img,
+                            sample_mask,
+                            contour_out,
+                            line_width=args.nodule_line_width,
+                            fill_alpha=args.nodule_fill_alpha,
+                        )
+                        sample_meta["nodule_contour"] = contour_info
+                        print(f"[nodule] sample {idx+1} saved: {contour_info['overlay_png']}")
+                    except Exception as e:
+                        sample_meta["nodule_contour_error"] = str(e)
+                        print(f"[nodule] sample {idx+1} contour failed: {e}")
+                else:
+                    sample_meta["nodule_contour_skipped"] = "missing image_path or mask_path"
+            meta_list.append(sample_meta)
         (run_dir / "meta.json").write_text(json.dumps({"checkpoint": ckpt, "num_val": num, "samples": meta_list}, ensure_ascii=False, indent=2), encoding="utf-8")
         print(f"\n已落盘: {run_dir}")
         return 0
@@ -551,7 +581,10 @@ def main():
     if not args.image or not Path(args.image).exists():
         print("请指定 --image <NIfTI路径> 或使用 --val_sample")
         return 1
-    image_t = load_image_tensor(args.image).to(device)
+    if args.mask and not Path(args.mask).exists():
+        print(f"mask file not found: {args.mask}")
+        return 1
+    image_t = load_image_tensor(args.image, mask_path=args.mask).to(device)
     text = generate_from_image(
         image_t, vision_bridge, llm_model, tokenizer,
         max_new_tokens=args.max_new_tokens, device=device, max_visual_tokens=args.max_visual_tokens,
@@ -565,7 +598,29 @@ def main():
     print("生成报告:")
     print(text)
     (run_dir / "generated.txt").write_text(text, encoding="utf-8")
-    (run_dir / "meta.json").write_text(json.dumps({"checkpoint": ckpt, "image_path": args.image}, ensure_ascii=False, indent=2), encoding="utf-8")
+    run_meta = {"checkpoint": ckpt, "image_path": args.image, "mask_path": args.mask}
+    if args.draw_nodule_contour:
+        if not args.mask:
+            run_meta["nodule_contour_skipped"] = "--draw_nodule_contour requires --mask"
+            print("[nodule] skipped: please provide --mask with --draw_nodule_contour")
+        else:
+            try:
+                contour_out = run_dir / args.nodule_output_subdir
+                contour_info = generate_nodule_contour_outputs(
+                    args.image,
+                    args.mask,
+                    contour_out,
+                    line_width=args.nodule_line_width,
+                    fill_alpha=args.nodule_fill_alpha,
+                )
+                run_meta["nodule_contour"] = contour_info
+                print(f"[nodule] contour overlay: {contour_info['overlay_png']}")
+                print(f"[nodule] stats csv: {contour_info['stats_csv']}")
+                print(f"[nodule] nodule count: {contour_info['nodule_count']}")
+            except Exception as e:
+                run_meta["nodule_contour_error"] = str(e)
+                print(f"[nodule] contour failed: {e}")
+    (run_dir / "meta.json").write_text(json.dumps(run_meta, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"\n已落盘: {run_dir}")
     return 0
 

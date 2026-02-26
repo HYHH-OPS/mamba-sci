@@ -1,11 +1,29 @@
-﻿__pycache__/
+# Python
+__pycache__/
 *.pyc
+*.pyo
 .venv/
 .venv_wsl/
+*.egg-info/
+.pytest_cache/
+
+# Outputs & runs (SCI: do not commit; regenerate per config)
 outputs/
 mamba-res/
+*.log
+train_monitor.txt
+
+# Weights & caches
 models/
 *.pt
 *.pth
 *.safetensors
 *.bin
+.BROKEN
+*.BR*
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
