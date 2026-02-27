@@ -1,4 +1,4 @@
-﻿"""
+"""
 Medical VLM dataset: load CT NIfTI + report CSV.
 Supports optional mask_path for lesion-guided slice selection.
 """
@@ -177,6 +177,15 @@ class MedicalVLMDataset(Dataset):
             else [""] * len(self.img_paths)
         )
         self.answers = self.df["answer"].astype(str).tolist()
+        # 可选：侵润/分级标签（AAH/AIS/MIA/IAC 等），若不存在则全部置为 -1
+        if "grade" in self.df.columns:
+            try:
+                self.grades = self.df["grade"].astype(int).tolist()
+            except Exception:
+                # 若无法直接转为 int，则保持原始字符串，后续由训练侧自行解析
+                self.grades = self.df["grade"].astype(str).tolist()
+        else:
+            self.grades = [-1] * len(self.img_paths)
         self.patch_size = patch_size
         self.slice_axis = slice_axis
         self.normalize = normalize
@@ -206,8 +215,10 @@ class MedicalVLMDataset(Dataset):
                 if arr.size > 0 and float(arr.max() - arr.min()) < 1e-6:
                     print("               [WARNING] Image is completely black/empty! Consider slice selection.", flush=True)
         except Exception as e:
-            print(f"[Error] Failed to load {path}: {e}", flush=True)
-            arr = np.random.randn(self.patch_size, self.patch_size).astype(np.float32)
+            raise RuntimeError(
+                f"Failed to load image at index={index}: {path}. "
+                "Please fix the CSV/image paths before training."
+            ) from e
 
         arr = _resize_to_patch(arr, self.patch_size)
         if self.normalize:
@@ -217,12 +228,14 @@ class MedicalVLMDataset(Dataset):
             else:
                 arr = np.zeros_like(arr)
         image = torch.from_numpy(arr).float().unsqueeze(0)
+        grade = self.grades[index] if index < len(self.grades) else -1
         return {
             "image": image,
             "question": question,
             "answer": answer,
             "image_path": path,
             "mask_path": mask_path,
+            "grade": grade,
         }
 
 

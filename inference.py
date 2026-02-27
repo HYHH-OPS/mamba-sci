@@ -122,6 +122,9 @@ _ONLY_ANGLE_BRACKET = re.compile(r"^\s*<[^>]+>\s*$")
 # <...> 内若含真实报告特征（肺、结节、mm、IM 等）则保留该行
 _REAL_CONTENT_IN_BRACKETS = re.compile(r"<[^>]*(?:肺|结节|mm|IM\d|胸廓|纵隔)[^>]*>")
 
+# 四级分级标签（顺序需与训练时一致）
+GRADE_LABELS = ["AAH", "AIS", "MIA", "IAC"]
+
 def _drop_placeholder_lines(text: str) -> str:
     """去掉仅含模板占位符的行（如「建议：<随访或检查建议>」），保留真实报告内容。"""
     if not text or not text.strip():
@@ -265,6 +268,33 @@ def load_image_tensor(
     return _resize_to_patch(arr, patch_size)
 
 
+def infer_grade_from_queries(vision_bridge: torch.nn.Module) -> dict | None:
+    """
+    使用 VimBridge 中缓存的 latest_queries_out 与 grade_head 进行四级分级推断。
+    要求:
+      - vision_bridge.bridge.latest_queries_out 已由最近一次前向更新
+      - vision_bridge.grade_head 存在且已加载训练好的权重
+    返回:
+      dict(label=..., index=..., probs=[...]) 或 None
+    """
+    bridge = getattr(vision_bridge, "bridge", None)
+    grade_head = getattr(vision_bridge, "grade_head", None)
+    queries = getattr(bridge, "latest_queries_out", None) if bridge is not None else None
+    if grade_head is None or queries is None:
+        return None
+    if queries.ndim != 3 or queries.shape[0] == 0:
+        return None
+    q = queries.mean(dim=1)  # [B, D]
+    device = next(grade_head.parameters()).device
+    q = q.to(device)
+    with torch.inference_mode():
+        logits = grade_head(q)  # [B, 4]
+        probs = torch.softmax(logits, dim=-1)[0].tolist()
+        idx = int(logits.argmax(dim=-1)[0])
+    label = GRADE_LABELS[idx] if 0 <= idx < len(GRADE_LABELS) else str(idx)
+    return {"label": label, "index": idx, "probs": probs}
+
+
 def load_vision_bridge(checkpoint_path: str | Path, config: dict, device: torch.device):
     from model.forward_medical_vlm import build_medical_vlm_from_config
     model = build_medical_vlm_from_config(config)
@@ -273,8 +303,28 @@ def load_vision_bridge(checkpoint_path: str | Path, config: dict, device: torch.
     # 若模型含 CMI 等可选模块而 checkpoint 为旧版未保存，则非严格加载以兼容
     # Always allow extra keys (e.g., cmi_connector) to keep inference compatible
     load_ok = model.load_state_dict(state, strict=False)
-    if load_ok.missing_keys:
-        print("注意: checkpoint 中缺少部分参数（如 cmi_connector），已忽略；缺失:", load_ok.missing_keys[:5], "...")
+    if hasattr(load_ok, "missing_keys") and load_ok.missing_keys:
+        print(
+            "注意: checkpoint 中缺少部分参数（如 cmi_connector），已忽略；缺失:",
+            load_ok.missing_keys[:5],
+            "...",
+        )
+
+    # 可选：加载四级分级头（AAH/AIS/MIA/IAC）
+    if isinstance(ckpt, dict) and "grade_head_state_dict" in ckpt:
+        try:
+            num_grades = int(ckpt.get("num_grades", 4))
+        except Exception:
+            num_grades = 4
+        d_model = int(config.get("bridge_d_model", 2560))
+        grade_head = torch.nn.Linear(d_model, num_grades)
+        grade_head.load_state_dict(ckpt["grade_head_state_dict"])
+        model.grade_head = grade_head.to(device)
+        print("已从 checkpoint 恢复 grade_head，用于 AAH/AIS/MIA/IAC 分级。", flush=True)
+    else:
+        # 兼容旧版 checkpoint：无分级头时直接跳过
+        model.grade_head = None  # type: ignore[attr-defined]
+
     return model.to(device).eval()
 
 
@@ -553,6 +603,10 @@ def main():
                 "mask_path": sample.get("mask_path"),
                 "prompt": prompt.strip(),
             }
+            grade_info = infer_grade_from_queries(vision_bridge)
+            if grade_info is not None:
+                sample_meta["grade"] = grade_info
+                print(f"[grade] sample {idx+1}: {grade_info['label']} probs={grade_info['probs']}")
             if args.draw_nodule_contour:
                 sample_img = sample.get("image_path")
                 sample_mask = sample.get("mask_path")
@@ -599,6 +653,10 @@ def main():
     print(text)
     (run_dir / "generated.txt").write_text(text, encoding="utf-8")
     run_meta = {"checkpoint": ckpt, "image_path": args.image, "mask_path": args.mask}
+    grade_info = infer_grade_from_queries(vision_bridge)
+    if grade_info is not None:
+        run_meta["grade"] = grade_info
+        print(f"[grade] {grade_info['label']} probs={grade_info['probs']}")
     if args.draw_nodule_contour:
         if not args.mask:
             run_meta["nodule_contour_skipped"] = "--draw_nodule_contour requires --mask"

@@ -79,22 +79,37 @@ class VimBridge(nn.Module):
         else:
             self.vim_bwd = None
             self.out_proj = nn.Identity()
+        # Learnable clinical queries（Q-Former 风格），用于侵润/风险分级等下游任务。
+        # 注意：Mamba 为序列模型，queries 放在图像 token 之后，保证在处理 queries 前已“看完”整幅图像。
+        self.num_queries = 32
+        self.query_tokens = nn.Parameter(torch.randn(self.num_queries, d_model))
+        self.latest_queries_out: torch.Tensor | None = None
 
     def forward(self, feat_2d: torch.Tensor) -> torch.Tensor:
         """
         feat_2d: [B, C, H, W]
-        return: [B, H*W, d_model]
+        return: [B, H*W, d_model]（仅返回图像 token，queries_out 可通过 self.latest_queries_out 访问）
         """
         B, C, H, W = feat_2d.shape
         # 按行展平为 1D 序列（Vim 做法）
         x = feat_2d.flatten(2).permute(0, 2, 1)  # [B, L, C]
         x = self.norm(self.proj(x))  # [B, L, d_model]
 
+        # 先图像 token，后 Query，符合 Mamba 序列依赖特性
+        B, L, D = x.shape
+        queries = self.query_tokens.unsqueeze(0).expand(B, -1, -1)  # [B, Q, D]
+        seq = torch.cat([x, queries], dim=1)  # [B, L+Q, D]
+
         if self.bidirectional:
-            x_fwd = self.vim_fwd(x)
-            x_bwd = self.vim_bwd(torch.flip(x, dims=[1]))
-            x_bwd = torch.flip(x_bwd, dims=[1])
-            x = self.out_proj(torch.cat([x_fwd, x_bwd], dim=-1))
+            seq_fwd = self.vim_fwd(seq)
+            seq_bwd = self.vim_bwd(torch.flip(seq, dims=[1]))
+            seq_bwd = torch.flip(seq_bwd, dims=[1])
+            seq = self.out_proj(torch.cat([seq_fwd, seq_bwd], dim=-1))
         else:
-            x = self.vim_fwd(x)
-        return x
+            seq = self.vim_fwd(seq)
+
+        # 拆分图像 token 与 Query 表示
+        tokens = seq[:, :-self.num_queries, :]          # [B, L, D]
+        queries_out = seq[:, -self.num_queries:, :]     # [B, Q, D]
+        self.latest_queries_out = queries_out
+        return tokens

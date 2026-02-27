@@ -1,4 +1,4 @@
-﻿"""
+"""
 VLM 图像→报告训练：仅训练 Vision+Bridge，Mamba 冻结。
 输入：问题+报告；Loss 只对「报告」部分计算，与推理时「问题+换行」后生成报告一致。
 
@@ -141,7 +141,10 @@ def compute_batch_loss(
     max_text_len: int,
     d_model: int,
     use_gradient_checkpointing: bool = False,
-) -> torch.Tensor:
+    grade_head: torch.nn.Module | None = None,
+    class_weights: torch.Tensor | None = None,
+    lambda_cls: float = 1.0,
+) -> tuple[torch.Tensor, float, float]:
     """
     单 batch 前向 + caption loss。
     Loss 仅对「回答」部分计算（视觉+问题+换行 均为 -100）。
@@ -155,10 +158,14 @@ def compute_batch_loss(
 
     # 视觉编码 + 池化（可选梯度检查点省显存）
     if use_gradient_checkpointing and vision_bridge.training:
-        vis = torch.utils.checkpoint.checkpoint(vision_bridge, images, use_reentrant=False)
+        vis_tokens = torch.utils.checkpoint.checkpoint(vision_bridge, images, use_reentrant=False)
     else:
-        vis = vision_bridge(images)
-    vis = _pool_visual_tokens(vis, max_visual_tokens)
+        vis_tokens = vision_bridge(images)
+    # VimBridge 内部会将 queries 输出缓存到 latest_queries_out，供分级任务使用
+    bridge = getattr(vision_bridge, "bridge", None)
+    queries_out = getattr(bridge, "latest_queries_out", None) if bridge is not None else None
+
+    vis = _pool_visual_tokens(vis_tokens, max_visual_tokens)
     L_vis = vis.shape[1]
 
     # 文本：与推理一致格式为 "问题\n回答"
@@ -227,12 +234,37 @@ def compute_batch_loss(
     out = llm_model(inputs_embeds=inputs_embeds, attention_mask=attn_mask)
     logits = out.logits[:, : seq_len - 1]
     shift_labels = labels[:, 1:]
-    loss = F.cross_entropy(
+    caption_loss = F.cross_entropy(
         logits.reshape(-1, logits.shape[-1]),
         shift_labels.reshape(-1),
         ignore_index=-100,
     )
-    return loss
+    # 侵润/分级损失（可选）
+    cls_loss = torch.tensor(0.0, device=llm_device)
+    grades_raw = batch.get("grade", None)
+    if grade_head is not None and grades_raw is not None:
+        grades = torch.as_tensor(grades_raw, device=llm_device)
+        valid_mask = grades >= 0
+        if valid_mask.any():
+            if queries_out is not None:
+                cls_repr = queries_out.to(llm_device).mean(dim=1)  # [B, D]
+            else:
+                # 回退：用未池化的视觉 token 均值作为表示
+                cls_repr = vis_tokens.to(llm_device).mean(dim=1)
+            cls_input = cls_repr[valid_mask]
+            cls_labels = grades[valid_mask].to(llm_device).long()
+            cls_logits = grade_head(cls_input)
+            if class_weights is not None:
+                w = class_weights.to(cls_logits.device)
+                cls_loss = F.cross_entropy(cls_logits, cls_labels, weight=w)
+            else:
+                cls_loss = F.cross_entropy(cls_logits, cls_labels)
+        else:
+            # 用 dummy loss 保证计算图不断裂
+            cls_loss = grade_head.weight.sum() * 0.0
+
+    total_loss = caption_loss + lambda_cls * cls_loss
+    return total_loss, float(caption_loss.detach().cpu()), float(cls_loss.detach().cpu())
 
 
 def main() -> int:
@@ -272,6 +304,28 @@ def main() -> int:
         return 1
 
     train_ds = MedicalVLMDataset(csv_train, prompt_json_file=config.get("caption_prompt_json"))
+    # 侵润/分级类别数（AAH/AIS/MIA/IAC）
+    num_grades = 4
+    # 根据数据分布估计类别权重，缓解类别不平衡；若无 grade 列则为 None
+    class_weights = None
+    if hasattr(train_ds, "grades"):
+        counts = torch.zeros(num_grades, dtype=torch.long)
+        for g in getattr(train_ds, "grades", []):
+            try:
+                gi = int(g)
+            except Exception:
+                continue
+            if 0 <= gi < num_grades:
+                counts[gi] += 1
+        if counts.sum() > 0:
+            counts_f = counts.float()
+            # 避免 0，使用非零均值替代
+            if (counts_f == 0).any() and (counts_f > 0).any():
+                nz_mean = counts_f[counts_f > 0].mean()
+                counts_f[counts_f == 0] = nz_mean
+            inv = counts_f.sum() / (counts_f + 1e-6)
+            class_weights = (inv / inv.mean()).clone()
+
     use_cuda = torch.cuda.is_available()
     device = torch.device("cuda" if use_cuda else "cpu")
     if use_cuda:
@@ -306,6 +360,8 @@ def main() -> int:
     else:
         print("未指定 --vision_checkpoint：Vision Encoder + Bridge 将随机初始化并端到端训练。", flush=True)
     vision_bridge = vision_bridge.to(device)
+    # 分级头：输入维度与 bridge_d_model 一致，输出 4 类（AAH/AIS/MIA/IAC）
+    grade_head = torch.nn.Linear(config.get("bridge_d_model", 2560), num_grades, device=device)
     # End-to-end: unfreeze encoder and bridge together.
     if hasattr(vision_bridge, "encoder"):
         for p in vision_bridge.encoder.parameters():
@@ -317,6 +373,7 @@ def main() -> int:
             else:
                 print("encoder 未提供原生 gradient checkpointing 接口，继续使用外层 checkpoint 包裹前向。", flush=True)
     trainable = [p for p in vision_bridge.parameters() if p.requires_grad]
+    trainable.extend(list(grade_head.parameters()))
     optimizer = torch.optim.AdamW(trainable, lr=args.lr)
     scaler = GradScaler("cuda") if device.type == "cuda" else None
 
@@ -341,6 +398,8 @@ def main() -> int:
     llm_device = next(llm_model.parameters()).device
     embed = llm_model.get_input_embeddings()
     d_model = llm_model.config.hidden_size
+    # 确保分级头与 LLM/视觉在同一设备上，避免 device mismatch
+    grade_head = grade_head.to(llm_device)
     max_visual_tokens = getattr(args, "max_visual_tokens", 144)
     max_text_len = getattr(args, "max_text_len", DEFAULT_MAX_TEXT_LEN)
     _summarize_text_token_lengths(
@@ -379,7 +438,7 @@ def main() -> int:
     heartbeat_path = out_dir / "stage2_heartbeat.txt"
     try:
         log_fh = open(log_csv, "w", encoding="utf-8")
-        log_fh.write("step,epoch,caption_loss\n")
+        log_fh.write("step,epoch,caption_loss,cls_loss\n")
         log_fh.flush()
     except OSError as e:
         log_fh = None
@@ -445,7 +504,7 @@ def main() -> int:
                 print(f"epoch {epoch+1} step {global_step+1} start", flush=True)
             if use_amp:
                 with autocast("cuda", dtype=torch.float16):
-                    loss = compute_batch_loss(
+                    loss, cap_loss_val, cls_loss_val = compute_batch_loss(
                         batch,
                         vision_bridge,
                         llm_model,
@@ -457,11 +516,13 @@ def main() -> int:
                         max_text_len,
                         d_model,
                         use_gradient_checkpointing=use_grad_ckpt,
+                        grade_head=grade_head,
+                        class_weights=class_weights,
                     )
                 loss = loss / accum_steps
                 scaler.scale(loss).backward()
             else:
-                loss = compute_batch_loss(
+                loss, cap_loss_val, cls_loss_val = compute_batch_loss(
                     batch,
                     vision_bridge,
                     llm_model,
@@ -473,6 +534,8 @@ def main() -> int:
                     max_text_len,
                     d_model,
                     use_gradient_checkpointing=use_grad_ckpt,
+                    grade_head=grade_head,
+                    class_weights=class_weights,
                 )
                 loss = loss / accum_steps
                 loss.backward()
@@ -497,18 +560,30 @@ def main() -> int:
                 optimizer.zero_grad(set_to_none=True)
 
             if global_step % args.log_every_steps == 0:
-                print(f"epoch {epoch+1} step {global_step} caption_loss {loss_val:.4f}", flush=True)
+                print(
+                    f"epoch {epoch+1} step {global_step} total_loss {loss_val:.4f} "
+                    f"(caption={cap_loss_val:.4f}, cls={cls_loss_val:.4f})",
+                    flush=True,
+                )
                 if log_fh is not None:
                     try:
-                        log_fh.write(f"{global_step},{epoch+1},{loss_val:.6f}\n")
+                        log_fh.write(f"{global_step},{epoch+1},{cap_loss_val:.6f},{cls_loss_val:.6f}\n")
                         log_fh.flush()
                     except OSError:
                         pass
 
             if args.save_every_steps > 0 and global_step % args.save_every_steps == 0 and global_step > 0:
                 ckpt_path = out_dir / f"vision_bridge_vlm_step{global_step}.pt"
-                torch.save({"step": global_step, "model_state_dict": vision_bridge.state_dict()}, ckpt_path)
-                print(f"  [step {global_step}] 已保存 {ckpt_path}", flush=True)
+                torch.save(
+                    {
+                        "step": global_step,
+                        "model_state_dict": vision_bridge.state_dict(),
+                        "grade_head_state_dict": grade_head.state_dict(),
+                        "num_grades": num_grades,
+                    },
+                    ckpt_path,
+                )
+                print(f"  [step {global_step}] 已保存 {ckpt_path}（含 grade_head）", flush=True)
 
         # epoch 末尾若有未 step 的累积梯度，补一次
         if accum_steps > 1 and global_step % accum_steps != 0:
@@ -522,8 +597,16 @@ def main() -> int:
         avg_loss = sum(epoch_losses) / len(epoch_losses) if epoch_losses else 0.0
         epoch_avgs.append(avg_loss)
         ckpt_path = out_dir / "vision_bridge_vlm_final.pt"
-        torch.save({"step": global_step, "model_state_dict": vision_bridge.state_dict()}, ckpt_path)
-        print(f"epoch {epoch+1} 结束, 平均 caption_loss {avg_loss:.4f}, 保存 {ckpt_path}", flush=True)
+        torch.save(
+            {
+                "step": global_step,
+                "model_state_dict": vision_bridge.state_dict(),
+                "grade_head_state_dict": grade_head.state_dict(),
+                "num_grades": num_grades,
+            },
+            ckpt_path,
+        )
+        print(f"epoch {epoch+1} 结束, 平均 caption_loss {avg_loss:.4f}, 保存 {ckpt_path}（含 grade_head）", flush=True)
 
     if log_fh is not None:
         try:

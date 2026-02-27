@@ -116,13 +116,13 @@ python train_vlm.py --from_scratch --epochs 20 --batch_size 1 --lr 2e-5 --max_vi
 训练完成后可用同一 Conda 环境测试（若用了 LOW_VRAM，此处改为 `--max_visual_tokens 64`）：
 
 ```powershell
-python scripts/check_image_to_text.py --checkpoint outputs/vision_bridge_vlm_final.pt --max_visual_tokens 96 --llm_device auto
+python inference.py --val_sample --num_val 1 --checkpoint outputs/vision_bridge_vlm_final.pt --max_visual_tokens 96 --llm_device auto
 ```
 
 若使用本地 Mamba：
 
 ```powershell
-python scripts/check_image_to_text.py --checkpoint outputs/vision_bridge_vlm_final.pt --max_visual_tokens 96 --mamba_model "D:/mamba/models/mamba-2.8b-hf" --llm_device auto
+python inference.py --val_sample --num_val 1 --checkpoint outputs/vision_bridge_vlm_final.pt --max_visual_tokens 96 --mamba_model "D:/mamba/models/mamba-2.8b-hf" --llm_device auto
 ```
 
 以上全部在 **Windows + Conda** 下完成，无需 WSL。
