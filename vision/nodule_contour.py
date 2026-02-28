@@ -90,6 +90,11 @@ def load_image_and_mask(
     if sitk is not None:
         img_ref = sitk.ReadImage(str(image_path))
         msk_ref = sitk.ReadImage(str(mask_path))
+        msk_pos_before = int(
+            np.asarray(
+                sitk.GetArrayFromImage(sitk.Cast(msk_ref > 0, sitk.sitkUInt8))
+            ).sum()
+        )
         if resample_mask:
             geometry_diff = (
                 msk_ref.GetSize() != img_ref.GetSize()
@@ -108,6 +113,12 @@ def load_image_and_mask(
                 )
         img = _ensure_3d(np.asarray(sitk.GetArrayFromImage(img_ref))).astype(np.float32)
         msk = _ensure_3d(np.asarray(sitk.GetArrayFromImage(msk_ref))).astype(np.uint8)
+        msk_pos_after = int((msk > 0).sum())
+        if msk_pos_before > 0 and msk_pos_after == 0:
+            raise ValueError(
+                "mask 在重采样到图像空间后变为全 0。通常是 image_path 与 mask_path 不是同一病例/"
+                "不同坐标系（例如把公共数据集 mask 用在私有 CT 上）。"
+            )
         if img.shape != msk.shape:
             raise ValueError(f"image shape {img.shape} != mask shape {msk.shape}")
         sx, sy, sz = img_ref.GetSpacing()[:3]

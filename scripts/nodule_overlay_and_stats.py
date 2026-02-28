@@ -12,6 +12,7 @@ Usage (必须使用真实存在的文件路径，不能使用占位符 xxx):
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -23,7 +24,10 @@ from vision.nodule_contour import generate_nodule_contour_outputs
 
 
 def _resolve_path(p: str) -> Path:
-    return Path(p).expanduser().resolve()
+    # Keep symlink/junction path text instead of dereferencing to real path.
+    # This avoids issues in some Windows setups where SimpleITK fails on
+    # resolved non-ASCII paths.
+    return Path(os.path.abspath(str(Path(p).expanduser())))
 
 
 def main() -> int:

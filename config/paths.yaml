@@ -18,8 +18,8 @@ nnunet_fold: 0
 nnunet_encoder_checkpoint: "d:/nnunet_results/Dataset503_TBLesion_327/nnUNetTrainer__nnUNetPlans__2d/fold_0/checkpoint_best.pth"
 
 # RadFM 风格 CSV / 病例文档（此处改为使用你刚刚从总表生成的 caption CSV）
-caption_csv_train: "d:/mamba/outputs/excel_caption/caption_train_template_shortq.csv"
-caption_csv_val: "d:/mamba/outputs/excel_caption/caption_val_template_shortq.csv"
+caption_csv_train: "d:/mamba/outputs/private_caption_aligned/caption_train_with_mask.csv"
+caption_csv_val: "d:/mamba/outputs/private_caption_aligned/caption_val_with_mask.csv"
 caption_prompt_json: "d:/unn-net/radfm_caption_prompt.json"
 # 多轮对话格式（可选）
 instruction_data_327: "d:/unn-net/radfm_instruction_data_327.json"

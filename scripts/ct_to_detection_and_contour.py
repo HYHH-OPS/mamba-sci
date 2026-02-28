@@ -33,6 +33,10 @@ DEFAULT_NNUNET_CONFIG = "2d"
 DEFAULT_FOLD = 0
 
 
+def _abs_no_resolve(p: str | Path) -> Path:
+    return Path(os.path.abspath(str(Path(p).expanduser())))
+
+
 def _load_config() -> dict:
     from data.medical_vlm_dataset import load_paths_config
     return load_paths_config(REPO / "config" / "paths.yaml")
@@ -50,7 +54,7 @@ def _run_nnunetv2_predict(
 ) -> Path | None:
     """
     调用 nnUNetv2 预测。返回预测结果中第一个 *_seg.nii.gz 的路径，失败返回 None。
-    先尝试 CLI nnUNetv2_predict，再尝试 python -m nnUNetv2.predict。
+    先尝试 CLI nnUNetv2_predict，再尝试 python -m nnunetv2.inference.predict_from_raw_data。
     """
     env = os.environ.copy()
     if nnunet_results:
@@ -66,7 +70,7 @@ def _run_nnunetv2_predict(
     # nnUNetv2 常见调用方式（不同版本可能不同）
     attempts = [
         ["nnUNetv2_predict", "-i", str(input_dir), "-o", str(output_dir), "-d", str(task_id), "-c", config, "-f", str(fold)],
-        [sys.executable, "-m", "nnUNetv2.predict", "-i", str(input_dir), "-o", str(output_dir), "-d", str(task_id), "-c", config, "-f", str(fold)],
+        [sys.executable, "-m", "nnunetv2.inference.predict_from_raw_data", "-i", str(input_dir), "-o", str(output_dir), "-d", str(task_id), "-c", config, "-f", str(fold)],
     ]
     ran_ok = False
     for cmd in attempts:
@@ -84,7 +88,7 @@ def _run_nnunetv2_predict(
             return None
 
     if not ran_ok:
-        print("未找到 nnUNetv2 命令行（请确认已安装 nnunetv2 并可用 nnUNetv2_predict 或 python -m nnUNetv2.predict）。", file=sys.stderr)
+        print("未找到 nnUNetv2 命令行（请确认已安装 nnunetv2 并可用 nnUNetv2_predict 或 python -m nnunetv2.inference.predict_from_raw_data）。", file=sys.stderr)
         return None
 
     # 查找输出：*_seg.nii.gz 或 *.nii.gz
@@ -111,12 +115,12 @@ def main() -> int:
     ap.add_argument("--keep_pred", action="store_true", help="保留 nnUNetv2 的临时预测目录（便于调试）")
     args = ap.parse_args()
 
-    image_path = Path(args.image).expanduser().resolve()
+    image_path = _abs_no_resolve(args.image)
     if not image_path.is_file():
         print("错误: 图像文件不存在:", image_path, file=sys.stderr)
         return 1
 
-    out_dir = Path(args.output_dir).expanduser().resolve()
+    out_dir = _abs_no_resolve(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     mask_path: Path | None = None
@@ -125,7 +129,7 @@ def main() -> int:
         if not args.mask:
             print("错误: --skip_nnunet 时必须提供 --mask（已有 mask 路径）", file=sys.stderr)
             return 1
-        mask_path = Path(args.mask).expanduser().resolve()
+        mask_path = _abs_no_resolve(args.mask)
         if not mask_path.is_file():
             print("错误: Mask 文件不存在:", mask_path, file=sys.stderr)
             return 1
@@ -133,7 +137,7 @@ def main() -> int:
     else:
         # Step 1: nnUNetv2 预测
         try:
-            import nnUNetv2  # noqa: F401
+            import nnunetv2  # noqa: F401
         except ImportError:
             print("未检测到 nnUNetv2。请安装: pip install nnunetv2", file=sys.stderr)
             print("安装后需设置环境变量 nnUNet_results / nnUNet_preprocessed / nnUNet_raw，或使用本脚本传入的 config。", file=sys.stderr)

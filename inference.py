@@ -1,14 +1,11 @@
-"""
-图像 → 文本生成：加载训练好的 Vision+Bridge 与 Mamba LLM，从 CT 图像生成报告。
-
-用法:
+﻿"""
+鍥惧儚 鈫?鏂囨湰鐢熸垚锛氬姞杞借缁冨ソ鐨?Vision+Bridge 涓?Mamba LLM锛屼粠 CT 鍥惧儚鐢熸垚鎶ュ憡銆?
+鐢ㄦ硶:
   python inference.py --image D:/nnunet_raw/Dataset503_.../imagesTr/xxx.nii.gz
-  python inference.py --val_sample   # 从验证集抽几条跑生成并打印
-  python inference.py --checkpoint outputs/vision_bridge_best_val.pt --image ...
+  python inference.py --val_sample   # 浠庨獙璇侀泦鎶藉嚑鏉¤窇鐢熸垚骞舵墦鍗?  python inference.py --checkpoint outputs/vision_bridge_best_val.pt --image ...
 
-若生成结果为英文/乱码：请确保已跑完 Stage 2 图文对齐训练（run_full_train.ps1 或 train_vlm.py），
-且 caption_loss 明显下降；仅 Stage 1 时模型未学过「见图写中文报告」。
-"""
+鑻ョ敓鎴愮粨鏋滀负鑻辨枃/涔辩爜锛氳纭繚宸茶窇瀹?Stage 2 鍥炬枃瀵归綈璁粌锛坮un_full_train.ps1 鎴?train_vlm.py锛夛紝
+涓?caption_loss 鏄庢樉涓嬮檷锛涗粎 Stage 1 鏃舵ā鍨嬫湭瀛﹁繃銆岃鍥惧啓涓枃鎶ュ憡銆嶃€?"""
 
 from __future__ import annotations
 
@@ -44,7 +41,7 @@ except Exception:
 
 
 class _VocabSizeMaskProcessor(LogitsProcessor if LogitsProcessor else object):
-    """当 config.vocab_size > len(tokenizer) 时，屏蔽超出 tokenizer 的 logits，避免生成 50277/50278/50279 等导致解码成乱码（如「外」）"""
+    """褰?config.vocab_size > len(tokenizer) 鏃讹紝灞忚斀瓒呭嚭 tokenizer 鐨?logits锛岄伩鍏嶇敓鎴?50277/50278/50279 绛夊鑷磋В鐮佹垚涔辩爜锛堝銆屽銆嶏級"""
 
     def __init__(self, vocab_len: int, model_vocab_size: int):
         self.vocab_len = vocab_len
@@ -59,7 +56,7 @@ class _VocabSizeMaskProcessor(LogitsProcessor if LogitsProcessor else object):
 
 
 class _SuppressEOSAtBegin(LogitsProcessor if LogitsProcessor else object):
-    """前 N 步禁止 EOS，迫使模型先输出正文，避免「原始输出为空」"""
+    """Suppress EOS for first N decode steps to avoid empty output."""
 
     def __init__(self, input_len: int, eos_token_id: int, suppress_steps: int = 64):
         self.input_len = input_len
@@ -76,7 +73,7 @@ class _SuppressEOSAtBegin(LogitsProcessor if LogitsProcessor else object):
 
 
 class _NumberListStoppingCriteria(StoppingCriteria if StoppingCriteria else object):
-    """生成时若解码结果结尾已是「数字, 数字, 数字」则提前停止，避免整段 45,46,47..."""
+    """鐢熸垚鏃惰嫢瑙ｇ爜缁撴灉缁撳熬宸叉槸銆屾暟瀛? 鏁板瓧, 鏁板瓧銆嶅垯鎻愬墠鍋滄锛岄伩鍏嶆暣娈?45,46,47..."""
 
     def __init__(self, input_len: int, tokenizer, min_len: int = 20):
         self.input_len = input_len
@@ -97,36 +94,32 @@ class _NumberListStoppingCriteria(StoppingCriteria if StoppingCriteria else obje
             return False
         return bool(_NUMBER_LIST_TAIL.search(text.strip()))
 
-# 无占位符的短 prompt，避免模型重复「建议：<随访或检查建议>」等模板内容而非生成真实报告
+# 鏃犲崰浣嶇鐨勭煭 prompt锛岄伩鍏嶆ā鍨嬮噸澶嶃€屽缓璁細<闅忚鎴栨鏌ュ缓璁?銆嶇瓑妯℃澘鍐呭鑰岄潪鐢熸垚鐪熷疄鎶ュ憡
 PROMPT_SHORT_NO_PLACEHOLDERS = (
-    "请根据胸部CT生成报告，按四段输出：所见、结论、建议、病理倾向。\n"
+    "璇锋牴鎹兏閮–T鐢熸垚鎶ュ憡锛屾寜鍥涙杈撳嚭锛氭墍瑙併€佺粨璁恒€佸缓璁€佺梾鐞嗗€惧悜銆俓n"
 )
 
-# 生成后截断：遇到广告/电话等黑名单内容即丢弃后续，减少幻觉
+# 鐢熸垚鍚庢埅鏂細閬囧埌骞垮憡/鐢佃瘽绛夐粦鍚嶅崟鍐呭鍗充涪寮冨悗缁紝鍑忓皯骞昏
 _BAD_PATTERNS = [
     r"请拨打电话", r"联系客服", r"客服电话", r"微信联系", r"联系电话",
     r"\+\s*\d{2}\s*[-]?\s*\d+", r"\d{11}", r"QQ\s*\d+",
-    r"悲剧情况", r"敬请关注", r"如需更多",
+    r"鎮插墽鎯呭喌", r"鏁鍏虫敞", r"濡傞渶鏇村",
 ]
-# 纯数字列表幻觉（如 45, 46, 47, ...）：整段丢弃或截断
-_NUMBER_LIST_PATTERN = re.compile(r"\d+\s*,\s*\d")
-# 生成时若解码结尾已是「数字, 数字, 数字」则提前停止，避免整段都是数字序列
-_NUMBER_LIST_TAIL = re.compile(r"\d+\s*,\s*\d+\s*,\s*\d+\s*$")
-# 模板占位符行（仅含 X：<...> 或 <...>），模型重复 prompt 时产生，需过滤
+# 绾暟瀛楀垪琛ㄥ够瑙夛紙濡?45, 46, 47, ...锛夛細鏁存涓㈠純鎴栨埅鏂?_NUMBER_LIST_PATTERN = re.compile(r"\d+\s*,\s*\d")
+# 鐢熸垚鏃惰嫢瑙ｇ爜缁撳熬宸叉槸銆屾暟瀛? 鏁板瓧, 鏁板瓧銆嶅垯鎻愬墠鍋滄锛岄伩鍏嶆暣娈甸兘鏄暟瀛楀簭鍒?_NUMBER_LIST_TAIL = re.compile(r"\d+\s*,\s*\d+\s*,\s*\d+\s*$")
+# 妯℃澘鍗犱綅绗﹁锛堜粎鍚?X锛?...> 鎴?<...>锛夛紝妯″瀷閲嶅 prompt 鏃朵骇鐢燂紝闇€杩囨护
 _PLACEHOLDER_LINE = re.compile(
-    r"^(?:\s*(?:所见|结论|建议|病理倾向|诊断)[:：]\s*)?"
-    r"<[^>]*(?:所见|结论|建议|病理|随访|检查|炎性|肿瘤|待定|征象|大小|定位|条结)[^>]*>\s*$"
+    r"^(?:\s*(?:鎵€瑙亅缁撹|寤鸿|鐥呯悊鍊惧悜|璇婃柇)[:锛歖\s*)?"
+    r"<[^>]*(?:鎵€瑙亅缁撹|寤鸿|鐥呯悊|闅忚|妫€鏌鐐庢€鑲跨槫|寰呭畾|寰佽薄|澶у皬|瀹氫綅|鏉＄粨)[^>]*>\s*$"
 )
-# 整行为单一 <...> 的也视为占位符
-_ONLY_ANGLE_BRACKET = re.compile(r"^\s*<[^>]+>\s*$")
-# <...> 内若含真实报告特征（肺、结节、mm、IM 等）则保留该行
-_REAL_CONTENT_IN_BRACKETS = re.compile(r"<[^>]*(?:肺|结节|mm|IM\d|胸廓|纵隔)[^>]*>")
+# 鏁磋涓哄崟涓€ <...> 鐨勪篃瑙嗕负鍗犱綅绗?_ONLY_ANGLE_BRACKET = re.compile(r"^\s*<[^>]+>\s*$")
+# <...> 鍐呰嫢鍚湡瀹炴姤鍛婄壒寰侊紙鑲恒€佺粨鑺傘€乵m銆両M 绛夛級鍒欎繚鐣欒琛?_REAL_CONTENT_IN_BRACKETS = re.compile(r"<[^>]*(?:鑲簗缁撹妭|mm|IM\d|鑳稿粨|绾甸殧)[^>]*>")
 
-# 四级分级标签（顺序需与训练时一致）
+# 鍥涚骇鍒嗙骇鏍囩锛堥『搴忛渶涓庤缁冩椂涓€鑷达級
 GRADE_LABELS = ["AAH", "AIS", "MIA", "IAC"]
 
 def _drop_placeholder_lines(text: str) -> str:
-    """去掉仅含模板占位符的行（如「建议：<随访或检查建议>」），保留真实报告内容。"""
+    """Drop placeholder-only lines while keeping real report content."""
     if not text or not text.strip():
         return text
     lines = text.split("\n")
@@ -154,14 +147,14 @@ def clean_generated(text: str) -> str:
         m = re.search(pat, text)
         if m:
             return text[: m.start()].strip()
-    # 若开头就是“数字, 数字”则整段视为幻觉
+    # 鑻ュ紑澶村氨鏄€滄暟瀛? 鏁板瓧鈥濆垯鏁存瑙嗕负骞昏
     if _NUMBER_LIST_PATTERN.match(text.strip()):
         return ""
-    # 若中间出现数字列表，只保留其前的有效内容
+    # 鑻ヤ腑闂村嚭鐜版暟瀛楀垪琛紝鍙繚鐣欏叾鍓嶇殑鏈夋晥鍐呭
     m = _NUMBER_LIST_PATTERN.search(text)
     if m:
         before = text[: m.start()].strip()
-        if len(before) > 2 and re.search(r"[一-龥\u4e00-\u9fff]", before):
+        if len(before) > 2 and re.search(r"[涓€-榫u4e00-\u9fff]", before):
             return before
         return ""
     return text.strip()
@@ -190,10 +183,10 @@ def _normalize_template_output(text: str) -> str:
     txt = (text or "").strip()
     if not txt:
         return (
-            "所见：胸部CT可见异常，具体定位与征象需结合原始影像复核。\n"
-            "结论：肺部病灶性质待定。\n"
-            "建议：建议短期复查胸部CT并结合临床。\n"
-            "病理倾向：炎性或肿瘤性待定。"
+            "鎵€瑙侊細鑳搁儴CT鍙寮傚父锛屽叿浣撳畾浣嶄笌寰佽薄闇€缁撳悎鍘熷褰卞儚澶嶆牳銆俓n"
+            "缁撹锛氳偤閮ㄧ梾鐏舵€ц川寰呭畾銆俓n"
+            "寤鸿锛氬缓璁煭鏈熷鏌ヨ兏閮–T骞剁粨鍚堜复搴娿€俓n"
+            "病理倾向：炎性或肿瘤性待定。\n"
         )
     if _template_complete(txt):
         return txt
@@ -220,14 +213,14 @@ def _normalize_template_output(text: str) -> str:
             section_map[h] = body
 
     return (
-        f"所见：{section_map['所见：']}\n"
-        f"结论：{section_map['结论：']}\n"
-        f"建议：{section_map['建议：']}\n"
-        f"病理倾向：{section_map['病理倾向：']}"
+        f"{TEMPLATE_HEADERS[0]}{section_map[TEMPLATE_HEADERS[0]]}\n"
+        f"{TEMPLATE_HEADERS[1]}{section_map[TEMPLATE_HEADERS[1]]}\n"
+        f"{TEMPLATE_HEADERS[2]}{section_map[TEMPLATE_HEADERS[2]]}\n"
+        f"{TEMPLATE_HEADERS[3]}{section_map[TEMPLATE_HEADERS[3]]}"
     )
 
 
-# 与 dataset 一致的 2D 加载
+# 涓?dataset 涓€鑷寸殑 2D 鍔犺浇
 def _load_nifti_slice(
     path: str,
     slice_axis: int = 0,
@@ -236,17 +229,13 @@ def _load_nifti_slice(
 ) -> np.ndarray:
     path = str(path).strip()
     if path in ("...", ".", "..") or not (path.endswith(".nii.gz") or path.endswith(".nii")):
-        raise ValueError(
-            f'无效的图像路径 "{path}"。请传入真实的 NIfTI 文件路径（.nii 或 .nii.gz），'
-            '或省略 --image 从验证集取图。'
-        )
+        raise ValueError(f"Invalid image path: {path}. Please pass a real .nii/.nii.gz file path.")
     return load_slice_with_optional_mask(
         path,
         mask_path=mask_path,
         slice_axis=slice_axis,
         slice_idx=slice_idx,
     )
-
 def _resize_to_patch(arr: np.ndarray, patch_size: int = 512) -> torch.Tensor:
     if arr.shape[0] != patch_size or arr.shape[1] != patch_size:
         t = torch.from_numpy(arr).float().unsqueeze(0).unsqueeze(0)
@@ -270,12 +259,10 @@ def load_image_tensor(
 
 def infer_grade_from_queries(vision_bridge: torch.nn.Module) -> dict | None:
     """
-    使用 VimBridge 中缓存的 latest_queries_out 与 grade_head 进行四级分级推断。
-    要求:
-      - vision_bridge.bridge.latest_queries_out 已由最近一次前向更新
-      - vision_bridge.grade_head 存在且已加载训练好的权重
-    返回:
-      dict(label=..., index=..., probs=[...]) 或 None
+    使用 VimBridge 缓存的 latest_queries_out 与 grade_head 进行分级推断。
+    兼容两种头：
+      - 旧版 4 类 softmax 头
+      - 新版 3 阈值序数头（>=AIS, >=MIA, >=IAC）
     """
     bridge = getattr(vision_bridge, "bridge", None)
     grade_head = getattr(vision_bridge, "grade_head", None)
@@ -287,12 +274,33 @@ def infer_grade_from_queries(vision_bridge: torch.nn.Module) -> dict | None:
     q = queries.mean(dim=1)  # [B, D]
     device = next(grade_head.parameters()).device
     q = q.to(device)
+    if not torch.isfinite(q).all():
+        q = torch.nan_to_num(q, nan=0.0, posinf=1e4, neginf=-1e4)
     with torch.inference_mode():
-        logits = grade_head(q)  # [B, 4]
-        probs = torch.softmax(logits, dim=-1)[0].tolist()
-        idx = int(logits.argmax(dim=-1)[0])
+        logits = grade_head(q)
+        n_out = int(logits.shape[-1])
+        if n_out == len(GRADE_LABELS):
+            probs = torch.softmax(logits, dim=-1)[0].tolist()
+            idx = int(logits.argmax(dim=-1)[0])
+            mode = "softmax_ce"
+        elif n_out == len(GRADE_LABELS) - 1:
+            # Ordinal decode: probs=sigmoid(logits), pred=(probs>0.5).sum(dim=1)
+            thr = torch.sigmoid(logits)[0]
+            idx = int((thr > 0.5).sum().item())
+            idx = max(0, min(idx, len(GRADE_LABELS) - 1))
+            ge0, ge1, ge2 = thr.tolist()
+            probs = [1.0 - ge0, ge0 - ge1, ge1 - ge2, ge2]
+            probs = [float(max(0.0, min(1.0, p))) for p in probs]
+            s = sum(probs)
+            if s > 0:
+                probs = [p / s for p in probs]
+            mode = "ordinal_bce"
+        else:
+            probs = torch.softmax(logits, dim=-1)[0].tolist()
+            idx = int(logits.argmax(dim=-1)[0])
+            mode = f"unknown_{n_out}"
     label = GRADE_LABELS[idx] if 0 <= idx < len(GRADE_LABELS) else str(idx)
-    return {"label": label, "index": idx, "probs": probs}
+    return {"label": label, "index": idx, "probs": probs, "mode": mode}
 
 
 def load_vision_bridge(checkpoint_path: str | Path, config: dict, device: torch.device):
@@ -300,7 +308,7 @@ def load_vision_bridge(checkpoint_path: str | Path, config: dict, device: torch.
     model = build_medical_vlm_from_config(config)
     ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
     state = ckpt["model_state_dict"] if isinstance(ckpt, dict) and "model_state_dict" in ckpt else ckpt
-    # 若模型含 CMI 等可选模块而 checkpoint 为旧版未保存，则非严格加载以兼容
+    # 若模型含 CMI 等可选模块而 checkpoint 为旧版未保存，则非严格加载以兼容。
     # Always allow extra keys (e.g., cmi_connector) to keep inference compatible
     load_ok = model.load_state_dict(state, strict=False)
     if hasattr(load_ok, "missing_keys") and load_ok.missing_keys:
@@ -310,17 +318,29 @@ def load_vision_bridge(checkpoint_path: str | Path, config: dict, device: torch.
             "...",
         )
 
-    # 可选：加载四级分级头（AAH/AIS/MIA/IAC）
+    # 可选：加载分级头，兼容旧版4类和新版3阈值输出。
     if isinstance(ckpt, dict) and "grade_head_state_dict" in ckpt:
-        try:
-            num_grades = int(ckpt.get("num_grades", 4))
-        except Exception:
-            num_grades = 4
+        grade_sd = ckpt["grade_head_state_dict"]
         d_model = int(config.get("bridge_d_model", 2560))
-        grade_head = torch.nn.Linear(d_model, num_grades)
-        grade_head.load_state_dict(ckpt["grade_head_state_dict"])
+        out_dim = None
+        if isinstance(grade_sd, dict):
+            w = grade_sd.get("weight", None)
+            if torch.is_tensor(w) and w.ndim == 2:
+                out_dim = int(w.shape[0])
+        if out_dim is None:
+            try:
+                out_dim = int(ckpt.get("num_grades", 4))
+            except Exception:
+                out_dim = 4
+        grade_head = torch.nn.Linear(d_model, out_dim)
+        grade_head.load_state_dict(grade_sd)
         model.grade_head = grade_head.to(device)
-        print("已从 checkpoint 恢复 grade_head，用于 AAH/AIS/MIA/IAC 分级。", flush=True)
+        classifier_mode = ckpt.get("classifier_mode", None)
+        if not isinstance(classifier_mode, str) or not classifier_mode:
+            classifier_mode = "ordinal_bce" if out_dim == len(GRADE_LABELS) - 1 else "softmax_ce"
+        model.classifier_mode = classifier_mode  # type: ignore[attr-defined]
+        model.ordinal_bins = int(ckpt.get("ordinal_bins", max(0, out_dim - 1)))  # type: ignore[attr-defined]
+        print(f"已从 checkpoint 恢复 grade_head: out_dim={out_dim}, mode={classifier_mode}", flush=True)
     else:
         # 兼容旧版 checkpoint：无分级头时直接跳过
         model.grade_head = None  # type: ignore[attr-defined]
@@ -329,11 +349,11 @@ def load_vision_bridge(checkpoint_path: str | Path, config: dict, device: torch.
 
 
 def _pool_visual_tokens(visual_tokens: torch.Tensor, max_tokens: int) -> torch.Tensor:
-    """将 [1, L, D] 的视觉 token 池化到最多 max_tokens，减轻显存（避免 OOM）。"""
+    """Pool visual tokens [B, L, D] down to max_tokens to reduce memory."""
     B, L, D = visual_tokens.shape
     if L <= max_tokens:
         return visual_tokens
-    # 假设 L = 28*28=784，池化到 14*14=196 或 7*7=49
+    # 鍋囪 L = 28*28=784锛屾睜鍖栧埌 14*14=196 鎴?7*7=49
     side = int(L ** 0.5)
     if side * side != L:
         return visual_tokens[:, :max_tokens]
@@ -368,12 +388,7 @@ def generate_from_image(
     raw_out: list | None = None,
     debug_vision: bool = False,
 ) -> str:
-    """
-    单张图像 + 提示 → 生成报告文本。
-    默认使用无占位符短 prompt，避免模型重复「建议：<随访或检查建议>」等模板内容。
-    image_tensor: [1, 1, 512, 512]
-    max_visual_tokens: 视觉 token 上限；do_sample: 采样/贪心；debug_vision: 打印视觉统计。
-    """
+    """Generate report text from one image tensor and prompt."""
     if prompt is None:
         prompt = PROMPT_SHORT_NO_PLACEHOLDERS
     if not prompt.endswith("\n"):
@@ -391,22 +406,21 @@ def generate_from_image(
         mean, std = v.mean().item(), v.std().item()
         print(f"[debug_vision] visual_tokens shape={tuple(visual_tokens.shape)} min={v.min().item():.4f} max={v.max().item():.4f} mean={mean:.4f} std={std:.4f} has_nan={has_nan}", flush=True)
         if has_nan or (abs(mean) < 1e-6 and std < 1e-6):
-            print("[debug_vision] 可能异常：接近全 0 或含 NaN，请检查图像预处理或 Vision Encoder 是否加载权重。", flush=True)
+            print("[debug_vision] possible issue: near-zero tokens or NaN detected.", flush=True)
         elif std > 100 or abs(mean) > 100:
-            print("[debug_vision] 可能异常：数值过大，疑为 Bridge 梯度爆炸或溢出。", flush=True)
+            print("[debug_vision] possible issue: unusually large activation values.", flush=True)
     L_vis = visual_tokens.shape[1]
     d_model = visual_tokens.shape[2]
 
-    # 提示 tokenize → embeddings（截断以减短序列，降低 GPU OOM）
+    # Tokenize prompt and build text embeddings.
     enc = tokenizer(
-        prompt,
         return_tensors="pt",
         padding=False,
         truncation=True,
         max_length=128,
     )
     llm_device = next(llm_model.parameters()).device
-    # 释放 GPU 显存：vision 已算完，可清缓存再送 LLM
+    # 閲婃斁 GPU 鏄惧瓨锛歷ision 宸茬畻瀹岋紝鍙竻缂撳瓨鍐嶉€?LLM
     if device.type == "cuda":
         torch.cuda.empty_cache()
     visual_tokens = visual_tokens.to(llm_device)
@@ -420,25 +434,25 @@ def generate_from_image(
             device=llm_device,
             dtype=prompt_embeds.dtype,
         )(prompt_embeds)
-    # 可选：CMI 机制（文本生成 SSM 参数，视觉流过 SSM 再融合），减轻握手失败/OOM
+    # 鍙€夛細CMI 鏈哄埗锛堟枃鏈敓鎴?SSM 鍙傛暟锛岃瑙夋祦杩?SSM 鍐嶈瀺鍚堬級锛屽噺杞绘彙鎵嬪け璐?OOM
     cmi = getattr(vision_bridge, "cmi_connector", None)
     if cmi is not None:
-        # 关键：保证 CMI 与输入都在 LLM 的 device 上（cpu 推理就全 cpu，避免 cpu/cuda 混用）
+        # Keep CMI on the same device as LLM inputs.
         if next(cmi.parameters()).device != llm_device:
             cmi = cmi.to(llm_device)
         with torch.inference_mode():
             visual_tokens = cmi(visual_tokens.to(llm_device), prompt_embeds.to(llm_device))
         L_vis = visual_tokens.shape[1]
 
-    # 最终拼接前再次确保同 device
+    # 鏈€缁堟嫾鎺ュ墠鍐嶆纭繚鍚?device
     visual_tokens = visual_tokens.to(llm_device)
     prompt_embeds = prompt_embeds.to(llm_device)
     inputs_embeds = torch.cat([visual_tokens, prompt_embeds], dim=1)  # [1, L_vis+L_prompt, D]
 
-    # 使用 transformers.generate：只解码「新生成」部分，避免把视觉/提示占位也当文本
+    # 浣跨敤 transformers.generate锛氬彧瑙ｇ爜銆屾柊鐢熸垚銆嶉儴鍒嗭紝閬垮厤鎶婅瑙?鎻愮ず鍗犱綅涔熷綋鏂囨湰
     input_len = L_vis + prompt_embeds.shape[1]
     attn_mask = torch.ones(inputs_embeds.shape[:2], device=inputs_embeds.device, dtype=torch.long)
-    # 医学报告需较长输出：max_new_tokens 建议 512，length_penalty>1 鼓励长句，no_repeat_ngram_size=0 避免误伤合理重复（如「双肺」「结节」）
+    # 鍖诲鎶ュ憡闇€杈冮暱杈撳嚭锛歮ax_new_tokens 寤鸿 512锛宭ength_penalty>1 榧撳姳闀垮彞锛宯o_repeat_ngram_size=0 閬垮厤璇激鍚堢悊閲嶅锛堝銆屽弻鑲恒€嶃€岀粨鑺傘€嶏級
     gen_kw = dict(
         inputs_embeds=inputs_embeds,
         attention_mask=attn_mask,
@@ -452,7 +466,7 @@ def generate_from_image(
         length_penalty=length_penalty,
         no_repeat_ngram_size=no_repeat_ngram_size if no_repeat_ngram_size > 0 else None,
     )
-    # 剔除 None，避免 generate 报错
+    # 鍓旈櫎 None锛岄伩鍏?generate 鎶ラ敊
     gen_kw = {k: v for k, v in gen_kw.items() if v is not None}
     if force_words_ids:
         # Constrained decoding works best with beam search + deterministic decode.
@@ -476,10 +490,27 @@ def generate_from_image(
         processors.append(_SuppressEOSAtBegin(input_len, tokenizer.eos_token_id, suppress_steps=suppress_eos_steps))
     if processors:
         gen_kw["logits_processor"] = LogitsProcessorList(processors)
-    gen_ids = llm_model.generate(**gen_kw)
-    # 对 inputs_embeds 场景，部分模型返回「完整序列」，部分只返回「新生成序列」。
-    # 若一律按 input_len 截断，可能把本就只含新 token 的输出切成空串。
-    if gen_ids.shape[1] > input_len:
+    try:
+        gen_ids = llm_model.generate(**gen_kw)
+    except ValueError as e:
+        err = str(e)
+        if force_words_ids and "Constrained Beam Search" in err:
+            # Transformers>=5 may require external custom_generate for constrained beam search.
+            # Fallback to standard decoding to keep inference functional.
+            fallback_kw = dict(gen_kw)
+            fallback_kw.pop("force_words_ids", None)
+            fallback_kw.pop("custom_generate", None)
+            fallback_kw.pop("trust_remote_code", None)
+            fallback_kw["do_sample"] = False
+            fallback_kw["num_beams"] = max(1, int(fallback_kw.get("num_beams", 1)))
+            print(
+                "[warn] constrained beam search is not supported in this transformers version; fallback to standard decoding.",
+                flush=True,
+            )
+            gen_ids = llm_model.generate(**fallback_kw)
+        else:
+            raise
+    # 瀵?inputs_embeds 鍦烘櫙锛岄儴鍒嗘ā鍨嬭繑鍥炪€屽畬鏁村簭鍒椼€嶏紝閮ㄥ垎鍙繑鍥炪€屾柊鐢熸垚搴忓垪銆嶃€?    # 鑻ヤ竴寰嬫寜 input_len 鎴柇锛屽彲鑳芥妸鏈氨鍙惈鏂?token 鐨勮緭鍑哄垏鎴愮┖涓层€?    if gen_ids.shape[1] > input_len:
         new_ids = gen_ids[0][input_len:]
     else:
         new_ids = gen_ids[0]
@@ -487,38 +518,38 @@ def generate_from_image(
     if raw_out is not None:
         raw_out.append(raw)
     cleaned = clean_generated(raw)
-    # 诊断：若过滤后为空但原始有内容，保留原始输出便于排查（如数字列表幻觉）
+    # If post-clean text is empty but raw text exists, keep raw for debugging.
     if cleaned == "" and (raw and raw.strip()):
         return raw
     return cleaned
 
 
 def main():
-    parser = argparse.ArgumentParser(description="医学 VLM 图像→文本生成")
-    parser.add_argument("--image", type=str, default=None, help="NIfTI 图像路径")
-    parser.add_argument("--mask", type=str, default=None, help="NIfTI mask 路径（用于病灶层面选择与结节勾画）")
-    parser.add_argument("--draw_nodule_contour", action="store_true", help="输出结节勾画图和结节统计 CSV（需配合 --mask）")
-    parser.add_argument("--nodule_output_subdir", type=str, default="nodule_contour", help="勾画结果输出到 run_dir 下的子目录名")
-    parser.add_argument("--nodule_line_width", type=float, default=1.8, help="勾画轮廓线宽")
-    parser.add_argument("--nodule_fill_alpha", type=float, default=0.22, help="勾画区域填充透明度")
-    parser.add_argument("--val_sample", action="store_true", help="从验证集抽几条跑生成")
-    parser.add_argument("--checkpoint", type=str, default=None, help="vision_bridge 权重，默认 outputs/vision_bridge_best_val.pt 或 vision_bridge_final.pt")
-    parser.add_argument("--mamba_model", type=str, default="state-spaces/mamba-2.8b-hf", help="Mamba 预训练模型")
-    parser.add_argument("--max_new_tokens", type=int, default=512, help="生成 token 上限，医学报告建议 512 以减少截断")
-    parser.add_argument("--max_visual_tokens", type=int, default=196, help="视觉 token 上限，省显存防 OOM，默认 196(14×14)")
-    parser.add_argument("--num_beams", type=int, default=1, help="beam size；>1 会更稳但更慢，约束解码建议 4")
-    parser.add_argument("--constrained_decode", action="store_true", help="约束解码：强制输出 所见/结论/建议/病理倾向 四段标题")
-    parser.add_argument("--length_penalty", type=float, default=1.1, help="长度惩罚 >1 鼓励更长输出，默认 1.1")
-    parser.add_argument("--no_repeat_ngram_size", type=int, default=0, help="禁止重复 n-gram，0=关闭(推荐)，4 会误伤医学合理重复")
-    parser.add_argument("--suppress_eos_steps", type=int, default=128, help="前 N 步禁止 EOS，避免过早结束，默认 128")
-    parser.add_argument("--llm_device", type=str, default="auto", choices=["auto", "cpu", "cuda"], help="Mamba 设备：auto 使用 GPU（推荐），cpu 防 OOM，cuda 强制 GPU")
+    parser = argparse.ArgumentParser(description="Medical VLM image-to-report inference")
+    parser.add_argument("--image", type=str, default=None, help="NIfTI 鍥惧儚璺緞")
+    parser.add_argument("--mask", type=str, default=None, help="NIfTI mask 璺緞锛堢敤浜庣梾鐏跺眰闈㈤€夋嫨涓庣粨鑺傚嬀鐢伙級")
+    parser.add_argument("--draw_nodule_contour", action="store_true", help="Export nodule contour overlay and stats CSV (requires --mask)")
+    parser.add_argument("--nodule_output_subdir", type=str, default="nodule_contour", help="鍕剧敾缁撴灉杈撳嚭鍒?run_dir 涓嬬殑瀛愮洰褰曞悕")
+    parser.add_argument("--nodule_line_width", type=float, default=1.8, help="鍕剧敾杞粨绾垮")
+    parser.add_argument("--nodule_fill_alpha", type=float, default=0.22, help="Contour fill alpha")
+    parser.add_argument("--val_sample", action="store_true", help="浠庨獙璇侀泦鎶藉嚑鏉¤窇鐢熸垚")
+    parser.add_argument("--checkpoint", type=str, default=None, help="vision_bridge 鏉冮噸锛岄粯璁?outputs/vision_bridge_best_val.pt 鎴?vision_bridge_final.pt")
+    parser.add_argument("--mamba_model", type=str, default="state-spaces/mamba-2.8b-hf", help="Mamba pretrained model path")
+    parser.add_argument("--max_new_tokens", type=int, default=512, help="Max generation tokens")
+    parser.add_argument("--max_visual_tokens", type=int, default=196, help="瑙嗚 token 涓婇檺锛岀渷鏄惧瓨闃?OOM锛岄粯璁?196(14脳14)")
+    parser.add_argument("--num_beams", type=int, default=1, help="beam size锛?1 浼氭洿绋充絾鏇存參锛岀害鏉熻В鐮佸缓璁?4")
+    parser.add_argument("--constrained_decode", action="store_true", help="绾︽潫瑙ｇ爜锛氬己鍒惰緭鍑?鎵€瑙?缁撹/寤鸿/鐥呯悊鍊惧悜 鍥涙鏍囬")
+    parser.add_argument("--length_penalty", type=float, default=1.1, help="闀垮害鎯╃綒 >1 榧撳姳鏇撮暱杈撳嚭锛岄粯璁?1.1")
+    parser.add_argument("--no_repeat_ngram_size", type=int, default=0, help="No-repeat ngram size; 0 disables")
+    parser.add_argument("--suppress_eos_steps", type=int, default=128, help="鍓?N 姝ョ姝?EOS锛岄伩鍏嶈繃鏃╃粨鏉燂紝榛樿 128")
+    parser.add_argument("--llm_device", type=str, default="auto", choices=["auto", "cpu", "cuda"], help="Mamba 璁惧锛歛uto 浣跨敤 GPU锛堟帹鑽愶級锛宑pu 闃?OOM锛宑uda 寮哄埗 GPU")
     parser.add_argument("--num_val", type=int, default=3)
-    parser.add_argument("--use_csv_prompt", action="store_true", help="验证时使用 CSV 中的问题作 prompt（含占位符）；默认用短 prompt 避免模型重复模板")
-    parser.add_argument("--do_sample", action="store_true", help="启用采样生成（可能更发散，默认关闭）")
-    parser.add_argument("--no_do_sample", action="store_true", help="禁用采样并使用贪心解码（默认）")
-    parser.add_argument("--temperature", type=float, default=0.6, help="采样温度，仅 do_sample 时有效，默认 0.6")
-    parser.add_argument("--repetition_penalty", type=float, default=1.2, help="重复惩罚，减轻重复词，默认 1.2")
-    parser.add_argument("--out_dir", type=str, default="D:/mamba-res", help="生成报告落盘目录，默认 D:/mamba-res")
+    parser.add_argument("--use_csv_prompt", action="store_true", help="楠岃瘉鏃朵娇鐢?CSV 涓殑闂浣?prompt锛堝惈鍗犱綅绗︼級锛涢粯璁ょ敤鐭?prompt 閬垮厤妯″瀷閲嶅妯℃澘")
+    parser.add_argument("--do_sample", action="store_true", help="鍚敤閲囨牱鐢熸垚锛堝彲鑳芥洿鍙戞暎锛岄粯璁ゅ叧闂級")
+    parser.add_argument("--no_do_sample", action="store_true", help="Disable sampling and use greedy decode")
+    parser.add_argument("--temperature", type=float, default=0.6, help="閲囨牱娓╁害锛屼粎 do_sample 鏃舵湁鏁堬紝榛樿 0.6")
+    parser.add_argument("--repetition_penalty", type=float, default=1.2, help="閲嶅鎯╃綒锛屽噺杞婚噸澶嶈瘝锛岄粯璁?1.2")
+    parser.add_argument("--out_dir", type=str, default="D:/mamba-res", help="鐢熸垚鎶ュ憡钀界洏鐩綍锛岄粯璁?D:/mamba-res")
     args = parser.parse_args()
     args.do_sample = bool(args.do_sample)
     if args.no_do_sample:
@@ -543,19 +574,19 @@ def main():
                 ckpt = str(p)
                 break
     if not ckpt or not Path(ckpt).exists():
-        print("未找到 vision_bridge checkpoint，请先训练或指定 --checkpoint")
+        print("鏈壘鍒?vision_bridge checkpoint锛岃鍏堣缁冩垨鎸囧畾 --checkpoint")
         return 1
 
-    print("加载 Vision+Bridge...")
+    print("鍔犺浇 Vision+Bridge...")
     vision_bridge = load_vision_bridge(ckpt, config, device)
-    print("加载 Mamba LLM（可能较久）...")
+    print("鍔犺浇 Mamba LLM锛堝彲鑳借緝涔咃級...")
     from llm.mamba_loader import load_mamba_lm
-    llm_device_map = "cpu" if args.llm_device == "cpu" else args.llm_device  # "auto" 或 "cuda" 使用 GPU
+    llm_device_map = "cpu" if args.llm_device == "cpu" else args.llm_device  # "auto" 鎴?"cuda" 浣跨敤 GPU
     llm_model, tokenizer = load_mamba_lm(args.mamba_model, device_map=llm_device_map)
-    # 与 train_vlm.py 一致：推理前再次确保 lm_head 绑定，避免乱码
+    # Align with train_vlm.py: tie lm_head to embeddings before generation.
     if hasattr(llm_model, "backbone") and hasattr(llm_model.backbone, "embeddings") and hasattr(llm_model, "lm_head"):
         llm_model.lm_head.weight = llm_model.backbone.embeddings.weight
-        print("执行权重绑定 (Tying lm_head → backbone.embeddings)...", flush=True)
+        print("Applied weight tying (lm_head -> backbone.embeddings)", flush=True)
     llm_model.eval()
     force_words_ids = _build_template_force_words_ids(tokenizer) if getattr(args, "constrained_decode", False) else None
 
@@ -568,7 +599,7 @@ def main():
         from data.medical_vlm_dataset import MedicalVLMDataset
         csv_val = config.get("caption_csv_val")
         if not csv_val or not Path(csv_val).exists():
-            print("验证集 CSV 不存在，无法 --val_sample")
+            print("楠岃瘉闆?CSV 涓嶅瓨鍦紝鏃犳硶 --val_sample")
             return 1
         val_ds = MedicalVLMDataset(csv_val, prompt_json_file=config.get("caption_prompt_json"))
         num = min(args.num_val, len(val_ds))
@@ -581,7 +612,7 @@ def main():
                 prompt = sample.get("question") or PROMPT_SHORT_NO_PLACEHOLDERS
             else:
                 prompt = PROMPT_SHORT_NO_PLACEHOLDERS
-            print(f"\n--- 验证样本 {idx+1}/{num} ---")
+            print(f"\n--- 楠岃瘉鏍锋湰 {idx+1}/{num} ---")
             print(f"Prompt: {prompt.strip()}")
             gen = generate_from_image(
                 image_t, vision_bridge, llm_model, tokenizer, prompt=prompt,
@@ -593,8 +624,8 @@ def main():
                 num_beams=getattr(args, "num_beams", 1),
                 force_words_ids=force_words_ids,
             )
-            print(f"生成: {gen[:500]}...")
-            print(f"参考: {answer_gt[:200]}...")
+            print(f"鐢熸垚: {gen[:500]}...")
+            print(f"鍙傝€? {answer_gt[:200]}...")
             (run_dir / f"sample_{idx+1}_gen.txt").write_text(gen, encoding="utf-8")
             (run_dir / f"sample_{idx+1}_ref.txt").write_text(answer_gt, encoding="utf-8")
             sample_meta = {
@@ -629,11 +660,11 @@ def main():
                     sample_meta["nodule_contour_skipped"] = "missing image_path or mask_path"
             meta_list.append(sample_meta)
         (run_dir / "meta.json").write_text(json.dumps({"checkpoint": ckpt, "num_val": num, "samples": meta_list}, ensure_ascii=False, indent=2), encoding="utf-8")
-        print(f"\n已落盘: {run_dir}")
+        print(f"\n宸茶惤鐩? {run_dir}")
         return 0
 
     if not args.image or not Path(args.image).exists():
-        print("请指定 --image <NIfTI路径> 或使用 --val_sample")
+        print("璇锋寚瀹?--image <NIfTI璺緞> 鎴栦娇鐢?--val_sample")
         return 1
     if args.mask and not Path(args.mask).exists():
         print(f"mask file not found: {args.mask}")
@@ -649,7 +680,7 @@ def main():
         num_beams=getattr(args, "num_beams", 1),
         force_words_ids=force_words_ids,
     )
-    print("生成报告:")
+    print("鐢熸垚鎶ュ憡:")
     print(text)
     (run_dir / "generated.txt").write_text(text, encoding="utf-8")
     run_meta = {"checkpoint": ckpt, "image_path": args.image, "mask_path": args.mask}
@@ -679,9 +710,10 @@ def main():
                 run_meta["nodule_contour_error"] = str(e)
                 print(f"[nodule] contour failed: {e}")
     (run_dir / "meta.json").write_text(json.dumps(run_meta, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(f"\n已落盘: {run_dir}")
+    print(f"\n宸茶惤鐩? {run_dir}")
     return 0
 
 
 if __name__ == "__main__":
     sys.exit(main())
+

@@ -25,6 +25,10 @@ if str(REPO) not in sys.path:
     sys.path.insert(0, str(REPO))
 
 
+def _abs_no_resolve(p: str | Path) -> Path:
+    return Path(__import__("os").path.abspath(str(Path(p).expanduser())))
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="新 CT → 分割+勾画 → 报告 → 侵润倾向占位")
     ap.add_argument("--image", required=True, help="新 CT 的 NIfTI 路径")
@@ -34,12 +38,12 @@ def main() -> int:
     ap.add_argument("--checkpoint", default=None, help="VLM checkpoint，默认 outputs/vision_bridge_vlm_final.pt")
     args = ap.parse_args()
 
-    image_path = Path(args.image).expanduser().resolve()
+    image_path = _abs_no_resolve(args.image)
     if not image_path.is_file():
         print("错误: 图像文件不存在:", image_path, file=sys.stderr)
         return 1
 
-    out_dir = Path(args.output_dir).expanduser().resolve()
+    out_dir = _abs_no_resolve(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     mask_path: Path | None = None
@@ -54,7 +58,7 @@ def main() -> int:
             "--output_dir", str(out_dir),
         ]
         if args.mask:
-            cmd_seg += ["--skip_nnunet", "--mask", str(Path(args.mask).resolve())]
+            cmd_seg += ["--skip_nnunet", "--mask", str(_abs_no_resolve(args.mask))]
         ret = subprocess.run(cmd_seg, cwd=str(REPO))
         if ret.returncode != 0:
             print("分割/勾画失败，终止流程。", file=sys.stderr)
@@ -64,7 +68,7 @@ def main() -> int:
             print("未找到 predicted_mask.nii.gz，请检查 Step 1 输出。", file=sys.stderr)
             return 1
     else:
-        mask_path = Path(args.mask).expanduser().resolve() if args.mask else (out_dir / "predicted_mask.nii.gz")
+        mask_path = _abs_no_resolve(args.mask) if args.mask else (out_dir / "predicted_mask.nii.gz")
         if not mask_path.is_file():
             print("--skip_segment 时需提供 --mask 或确保 output_dir 下已有 predicted_mask.nii.gz。", file=sys.stderr)
             return 1

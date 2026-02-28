@@ -234,7 +234,8 @@ class MedicalVLMDataset(Dataset):
             "question": question,
             "answer": answer,
             "image_path": path,
-            "mask_path": mask_path,
+            # DataLoader default_collate cannot batch None values.
+            "mask_path": mask_path if mask_path is not None else "",
             "grade": grade,
         }
 

@@ -1,0 +1,19 @@
+# Keep AI indexing focused on source/config/scripts.
+data/**
+outputs/**
+models/**
+mamba-res/**
+
+.venv/**
+.venv_wsl/**
+**/__pycache__/**
+**/.pytest_cache/**
+**/.mypy_cache/**
+**/.ruff_cache/**
+**/.ipynb_checkpoints/**
+
+*.pt
+*.pth
+*.safetensors
+*.bin
+*.log

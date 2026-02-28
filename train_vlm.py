@@ -1,8 +1,8 @@
-"""
-VLM 图像→报告训练：仅训练 Vision+Bridge，Mamba 冻结。
-输入：问题+报告；Loss 只对「报告」部分计算，与推理时「问题+换行」后生成报告一致。
+﻿"""
+VLM 鍥惧儚鈫掓姤鍛婅缁冿細浠呰缁?Vision+Bridge锛孧amba 鍐荤粨銆?
+杈撳叆锛氶棶棰?鎶ュ憡锛汱oss 鍙銆屾姤鍛娿€嶉儴鍒嗚绠楋紝涓庢帹鐞嗘椂銆岄棶棰?鎹㈣銆嶅悗鐢熸垚鎶ュ憡涓€鑷淬€?
 
-用法:
+鐢ㄦ硶:
   python train_vlm.py --epochs 30 --batch_size 8 --lr 1e-5 --max_visual_tokens 144
   python train_vlm.py --epochs 30 --batch_size 4 --lr 1e-5 --max_visual_tokens 144 --gradient_accumulation_steps 1
 """
@@ -40,14 +40,43 @@ if not _force_cuda:
 
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
-from torch.amp import autocast, GradScaler
+try:
+    # torch>=2.0 preferred API
+    from torch.amp import autocast as _autocast
+    from torch.amp import GradScaler as _GradScaler
+    _AMP_MODE = "torch.amp"
+except Exception:
+    # torch<2.0 fallback
+    from torch.cuda.amp import autocast as _autocast  # type: ignore
+    from torch.cuda.amp import GradScaler as _GradScaler  # type: ignore
+    _AMP_MODE = "torch.cuda.amp"
 
 from data.medical_vlm_dataset import MedicalVLMDataset, load_paths_config
 from model.forward_medical_vlm import build_medical_vlm_from_config
 from inference import _pool_visual_tokens
 
-# 默认文本长度；医学报告较长，过小会截断。
+# 榛樿鏂囨湰闀垮害锛涘尰瀛︽姤鍛婅緝闀匡紝杩囧皬浼氭埅鏂€?
 DEFAULT_MAX_TEXT_LEN = 512
+
+
+def _autocast_ctx(device: torch.device):
+    if device.type != "cuda":
+        return _autocast(enabled=False)
+    if _AMP_MODE == "torch.amp":
+        return _autocast("cuda", dtype=torch.float16)
+    # torch.cuda.amp.autocast has no device_type arg in old torch versions.
+    return _autocast(dtype=torch.float16)
+
+
+def _build_grad_scaler(device: torch.device):
+    if device.type != "cuda":
+        return None
+    if _AMP_MODE == "torch.amp":
+        try:
+            return _GradScaler("cuda")
+        except TypeError:
+            return _GradScaler()
+    return _GradScaler()
 
 
 def _summarize_text_token_lengths(dataset, tokenizer, max_text_len: int, max_samples: int = 0):
@@ -146,8 +175,8 @@ def compute_batch_loss(
     lambda_cls: float = 1.0,
 ) -> tuple[torch.Tensor, float, float]:
     """
-    单 batch 前向 + caption loss。
-    Loss 仅对「回答」部分计算（视觉+问题+换行 均为 -100）。
+    鍗?batch 鍓嶅悜 + caption loss銆?
+    Loss 浠呭銆屽洖绛斻€嶉儴鍒嗚绠楋紙瑙嗚+闂+鎹㈣ 鍧囦负 -100锛夈€?
     """
     images = batch["image"].to(device)
     if images.dim() == 3:
@@ -156,19 +185,19 @@ def compute_batch_loss(
     answers = batch["answer"]
     B = images.shape[0]
 
-    # 视觉编码 + 池化（可选梯度检查点省显存）
+    # 瑙嗚缂栫爜 + 姹犲寲锛堝彲閫夋搴︽鏌ョ偣鐪佹樉瀛橈級
     if use_gradient_checkpointing and vision_bridge.training:
         vis_tokens = torch.utils.checkpoint.checkpoint(vision_bridge, images, use_reentrant=False)
     else:
         vis_tokens = vision_bridge(images)
-    # VimBridge 内部会将 queries 输出缓存到 latest_queries_out，供分级任务使用
+    # VimBridge 鍐呴儴浼氬皢 queries 杈撳嚭缂撳瓨鍒?latest_queries_out锛屼緵鍒嗙骇浠诲姟浣跨敤
     bridge = getattr(vision_bridge, "bridge", None)
     queries_out = getattr(bridge, "latest_queries_out", None) if bridge is not None else None
 
     vis = _pool_visual_tokens(vis_tokens, max_visual_tokens)
     L_vis = vis.shape[1]
 
-    # 文本：与推理一致格式为 "问题\n回答"
+    # 鏂囨湰锛氫笌鎺ㄧ悊涓€鑷存牸寮忎负 "闂\n鍥炵瓟"
     full_texts = [f"{q}\n{a}" for q, a in zip(questions, answers)]
     enc = tokenizer(
         full_texts,
@@ -180,7 +209,7 @@ def compute_batch_loss(
     input_ids = enc["input_ids"].to(device)
     attention_mask = enc["attention_mask"].to(device)
 
-    # 仅对「回答」算 loss；prompt 长度 = "问题\n" 的 token 数（与推理一致）
+    # 浠呭銆屽洖绛斻€嶇畻 loss锛沺rompt 闀垮害 = "闂\n" 鐨?token 鏁帮紙涓庢帹鐞嗕竴鑷达級
     q_texts = [f"{q}\n" for q in questions]
     q_enc = tokenizer(
         q_texts,
@@ -191,7 +220,7 @@ def compute_batch_loss(
     )
     q_lens = q_enc["attention_mask"].sum(dim=1).tolist()
 
-    # Embedding（LLM 嵌入维须与 bridge_d_model 一致，否则需投影或 pad/trim）
+    # Embedding锛圠LM 宓屽叆缁撮』涓?bridge_d_model 涓€鑷达紝鍚﹀垯闇€鎶曞奖鎴?pad/trim锛?
     text_emb = embed(input_ids.to(llm_device))
     E = text_emb.shape[-1]
     if E != d_model:
@@ -202,7 +231,7 @@ def compute_batch_loss(
             text_emb = text_emb[:, :, :d_model]
     vis = vis.to(llm_device)
 
-    # 可选 CMI
+    # 鍙€?CMI
     cmi = getattr(vision_bridge, "cmi_connector", None)
     if cmi is not None:
         prompt_len = int(max(q_lens)) if q_lens else 0
@@ -215,7 +244,7 @@ def compute_batch_loss(
     attn_mask = torch.ones((B, seq_len), device=llm_device, dtype=torch.long)
     attn_mask[:, L_vis:] = attention_mask.to(llm_device)
 
-    # Labels：仅回答部分有效，其余 -100
+    # Labels锛氫粎鍥炵瓟閮ㄥ垎鏈夋晥锛屽叾浣?-100
     labels = torch.full(
         (B, seq_len), -100, device=llm_device, dtype=torch.long
     )
@@ -229,7 +258,7 @@ def compute_batch_loss(
         if end > start:
             labels[i, start:end] = input_ids[i, q_len:valid_len].to(llm_device)
 
-    # 前向 + loss（logits[t] 预测 position t+1）
+    # 鍓嶅悜 + loss锛坙ogits[t] 棰勬祴 position t+1锛?
     llm_model.eval()
     out = llm_model(inputs_embeds=inputs_embeds, attention_mask=attn_mask)
     logits = out.logits[:, : seq_len - 1]
@@ -239,28 +268,42 @@ def compute_batch_loss(
         shift_labels.reshape(-1),
         ignore_index=-100,
     )
-    # 侵润/分级损失（可选）
+    # 渚垫鼎/鍒嗙骇鎹熷け锛堝彲閫夛級
     cls_loss = torch.tensor(0.0, device=llm_device)
     grades_raw = batch.get("grade", None)
     if grade_head is not None and grades_raw is not None:
         grades = torch.as_tensor(grades_raw, device=llm_device)
         valid_mask = grades >= 0
         if valid_mask.any():
+            # Ordinal regression uses a stable visual representation as cls input.
+            cls_repr = None
             if queries_out is not None:
-                cls_repr = queries_out.to(llm_device).mean(dim=1)  # [B, D]
-            else:
-                # 回退：用未池化的视觉 token 均值作为表示
+                try:
+                    cls_repr = queries_out.to(llm_device).mean(dim=1)  # [B, D]
+                except Exception:
+                    cls_repr = None
+            if cls_repr is None or not torch.isfinite(cls_repr).all():
+                # Fallback to pooled visual tokens when cached queries are invalid.
                 cls_repr = vis_tokens.to(llm_device).mean(dim=1)
+            if not torch.isfinite(cls_repr).all():
+                # Final safety net against NaN/Inf.
+                cls_repr = torch.nan_to_num(cls_repr, nan=0.0, posinf=1e4, neginf=-1e4)
+
             cls_input = cls_repr[valid_mask]
             cls_labels = grades[valid_mask].to(llm_device).long()
             cls_logits = grade_head(cls_input)
-            if class_weights is not None:
-                w = class_weights.to(cls_logits.device)
-                cls_loss = F.cross_entropy(cls_logits, cls_labels, weight=w)
-            else:
-                cls_loss = F.cross_entropy(cls_logits, cls_labels)
+            ordinal_bins = int(cls_logits.shape[-1])
+            # y in {0,1,2,3} -> [y>0, y>1, y>2], e.g. 2 -> [1,1,0].
+            thresholds = torch.arange(ordinal_bins, device=cls_logits.device).unsqueeze(0)
+            ordinal_labels = (cls_labels.unsqueeze(1) > thresholds).to(cls_logits.dtype)
+            # Baseline version: no class weight / pos_weight.
+            cls_loss = F.binary_cross_entropy_with_logits(
+                cls_logits,
+                ordinal_labels,
+                reduction="mean",
+            )
         else:
-            # 用 dummy loss 保证计算图不断裂
+            # 鐢?dummy loss 淇濊瘉璁＄畻鍥句笉鏂
             cls_loss = grade_head.weight.sum() * 0.0
 
     total_loss = caption_loss + lambda_cls * cls_loss
@@ -268,25 +311,26 @@ def compute_batch_loss(
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="End-to-End VLM 训练：解冻 Vision+Bridge，Mamba 冻结")
-    parser.add_argument("--epochs", type=int, default=30, help="医学报告逻辑复杂，可增至 40 减轻欠拟合")
+    parser = argparse.ArgumentParser(description="End-to-End VLM 璁粌锛氳В鍐?Vision+Bridge锛孧amba 鍐荤粨")
+    parser.add_argument("--epochs", type=int, default=30, help="Training epochs")
     parser.add_argument("--batch_size", type=int, default=8)
-    parser.add_argument("--lr", type=float, default=1e-5, help="学习率；端到端解冻时建议 1e-5")
-    parser.add_argument("--max_visual_tokens", type=int, default=144, help="视觉 token 上限，建议与池化配置匹配（如 12x12=144）")
-    parser.add_argument("--max_text_len", type=int, default=DEFAULT_MAX_TEXT_LEN, help="问题+报告总 token 上限")
-    parser.add_argument("--gradient_accumulation_steps", type=int, default=1, help="梯度累积步数")
-    parser.add_argument("--save_every_steps", type=int, default=0, help="每 N 步额外存一次权重，0 表示仅每 epoch 结束存")
-    parser.add_argument("--log_every_steps", type=int, default=1, help="每 N 步打印一次 loss，默认 1（每步打印）")
-    parser.add_argument("--num_workers", type=int, default=8, help="DataLoader 线程数")
-    parser.add_argument("--vision_checkpoint", type=str, default=None, help="可选：从已有 Vision+Bridge 权重继续训练")
+    parser.add_argument("--lr", type=float, default=1e-5, help="瀛︿範鐜囷紱绔埌绔В鍐绘椂寤鸿 1e-5")
+    parser.add_argument("--max_visual_tokens", type=int, default=144, help="Max visual tokens after pooling (e.g. 12x12=144)")
+    parser.add_argument("--max_text_len", type=int, default=DEFAULT_MAX_TEXT_LEN, help="闂+鎶ュ憡鎬?token 涓婇檺")
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=1, help="姊害绱Н姝ユ暟")
+    parser.add_argument("--save_every_steps", type=int, default=0, help="Save an extra checkpoint every N steps; 0 means only save at epoch end")
+    parser.add_argument("--log_every_steps", type=int, default=1, help="姣?N 姝ユ墦鍗颁竴娆?loss锛岄粯璁?1锛堟瘡姝ユ墦鍗帮級")
+    parser.add_argument("--num_workers", type=int, default=8, help="DataLoader worker count")
+    parser.add_argument("--vision_checkpoint", type=str, default=None, help="鍙€夛細浠庡凡鏈?Vision+Bridge 鏉冮噸缁х画璁粌")
     parser.add_argument("--mamba_model", type=str, default="state-spaces/mamba-2.8b-hf")
-    parser.add_argument("--llm_8bit", action="store_true", help="LLM 8-bit 加载（需 bitsandbytes）")
-    parser.add_argument("--align_vocab", action="store_true", help="训练端对齐 tokenizer 与 embedding 词表大小（推荐开启）")
+    parser.add_argument("--llm_8bit", action="store_true", help="Load LLM in 8-bit mode (requires bitsandbytes)")
+    parser.add_argument("--align_vocab", action="store_true", help="璁粌绔榻?tokenizer 涓?embedding 璇嶈〃澶у皬锛堟帹鑽愬紑鍚級")
     parser.add_argument("--output_dir", type=str, default=None)
-    parser.add_argument("--gradient_checkpointing", dest="gradient_checkpointing", action="store_true", help="启用梯度检查点，省显存、略降速（默认开启）")
-    parser.add_argument("--no_gradient_checkpointing", dest="gradient_checkpointing", action="store_false", help="关闭梯度检查点")
-    parser.add_argument("--csv", type=str, default=None, help="直接指定 caption CSV，有值时优先于 paths.yaml")
-    parser.add_argument("--length_audit_samples", type=int, default=128, help="训练前抽样统计 token 长度；0 表示关闭")
+    parser.add_argument("--lambda_cls", type=float, default=1.0, help="classification loss weight")
+    parser.add_argument("--gradient_checkpointing", dest="gradient_checkpointing", action="store_true", help="鍚敤姊害妫€鏌ョ偣锛岀渷鏄惧瓨銆佺暐闄嶉€燂紙榛樿寮€鍚級")
+    parser.add_argument("--no_gradient_checkpointing", dest="gradient_checkpointing", action="store_false", help="鍏抽棴姊害妫€鏌ョ偣")
+    parser.add_argument("--csv", type=str, default=None, help="鐩存帴鎸囧畾 caption CSV锛屾湁鍊兼椂浼樺厛浜?paths.yaml")
+    parser.add_argument("--length_audit_samples", type=int, default=128, help="璁粌鍓嶆娊鏍风粺璁?token 闀垮害锛? 琛ㄧず鍏抽棴")
     parser.set_defaults(gradient_checkpointing=True)
     args = parser.parse_args()
 
@@ -300,14 +344,15 @@ def main() -> int:
 
     csv_train = args.csv or config.get("caption_csv_train")
     if not Path(csv_train).exists():
-        print("训练 CSV 不存在:", csv_train)
+        print("璁粌 CSV 涓嶅瓨鍦?", csv_train)
         return 1
 
     train_ds = MedicalVLMDataset(csv_train, prompt_json_file=config.get("caption_prompt_json"))
-    # 侵润/分级类别数（AAH/AIS/MIA/IAC）
-    num_grades = 4
-    # 根据数据分布估计类别权重，缓解类别不平衡；若无 grade 列则为 None
+    # 渚垫鼎/鍒嗙骇绫诲埆鏁帮紙AAH/AIS/MIA/IAC锛?    num_grades = 4
+    # 鏍规嵁鏁版嵁鍒嗗竷浼拌绫诲埆鏉冮噸锛岀紦瑙ｇ被鍒笉骞宠　锛涜嫢鏃?grade 鍒楀垯涓?None
     class_weights = None
+    valid_grade_count = 0
+    present_grade_classes = 0
     if hasattr(train_ds, "grades"):
         counts = torch.zeros(num_grades, dtype=torch.long)
         for g in getattr(train_ds, "grades", []):
@@ -317,14 +362,42 @@ def main() -> int:
                 continue
             if 0 <= gi < num_grades:
                 counts[gi] += 1
+        valid_grade_count = int(counts.sum().item())
+        present_grade_classes = int((counts > 0).sum().item())
         if counts.sum() > 0:
             counts_f = counts.float()
-            # 避免 0，使用非零均值替代
+            # Avoid zero-count divisions by filling zeros with non-zero mean.
             if (counts_f == 0).any() and (counts_f > 0).any():
                 nz_mean = counts_f[counts_f > 0].mean()
                 counts_f[counts_f == 0] = nz_mean
             inv = counts_f.sum() / (counts_f + 1e-6)
             class_weights = (inv / inv.mean()).clone()
+            print(f"detected valid grade labels: {valid_grade_count}, distribution={counts.tolist()}", flush=True)
+        else:
+            print(
+                "warning: train CSV has no valid grade(0-3); cls_loss will stay 0. Add grade column for classification training.",
+                flush=True,
+            )
+    else:
+        print(
+            "warning: dataset has no grades field; cls_loss will stay 0. Add grade column to CSV for classification training.",
+            flush=True,
+        )
+
+    if valid_grade_count == 0:
+        class_weights = None
+    if valid_grade_count > 0 and present_grade_classes < 2:
+        print(
+            "warning: only one grade class is present, classification head will be disabled.",
+            flush=True,
+        )
+    enable_cls_head = (
+        float(args.lambda_cls) > 0.0
+        and valid_grade_count > 0
+        and present_grade_classes >= 2
+    )
+    lambda_cls = float(args.lambda_cls) if enable_cls_head else 0.0
+    print(f"lambda_cls={lambda_cls:.4f} (requested={float(args.lambda_cls):.4f})", flush=True)
 
     use_cuda = torch.cuda.is_available()
     device = torch.device("cuda" if use_cuda else "cpu")
@@ -350,35 +423,43 @@ def main() -> int:
     ckpt = args.vision_checkpoint
     if ckpt:
         if not Path(ckpt).exists():
-            print(f"指定的 --vision_checkpoint 不存在: {ckpt}", flush=True)
+            print(f"鎸囧畾鐨?--vision_checkpoint 涓嶅瓨鍦? {ckpt}", flush=True)
             return 1
         state = torch.load(ckpt, map_location="cpu", weights_only=True)
         sd = state.get("model_state_dict", state)
         vision_bridge.load_state_dict(sd, strict=False)
-        step_info = f" (从 step {state.get('step', '?')} 续训)" if isinstance(state, dict) and state.get("step") else ""
+        step_info = f" (浠?step {state.get('step', '?')} 缁)" if isinstance(state, dict) and state.get("step") else ""
         print(f"Loaded Vision+Bridge: {ckpt}{step_info}", flush=True)
     else:
-        print("未指定 --vision_checkpoint：Vision Encoder + Bridge 将随机初始化并端到端训练。", flush=True)
+        print("--vision_checkpoint not provided: Vision Encoder + Bridge will be initialized and trained end-to-end.", flush=True)
     vision_bridge = vision_bridge.to(device)
-    # 分级头：输入维度与 bridge_d_model 一致，输出 4 类（AAH/AIS/MIA/IAC）
-    grade_head = torch.nn.Linear(config.get("bridge_d_model", 2560), num_grades, device=device)
+    # 鍒嗙骇澶达細杈撳叆缁村害涓?bridge_d_model 涓€鑷达紝杈撳嚭 4 绫伙紙AAH/AIS/MIA/IAC锛?
+    ordinal_bins = num_grades - 1
+    grade_head = torch.nn.Linear(config.get("bridge_d_model", 2560), ordinal_bins, device=device)
+    if enable_cls_head:
+        print("grade_head enabled.", flush=True)
+    else:
+        for p in grade_head.parameters():
+            p.requires_grad = False
+        print("grade_head disabled (kept for checkpoint compatibility).", flush=True)
     # End-to-end: unfreeze encoder and bridge together.
     if hasattr(vision_bridge, "encoder"):
         for p in vision_bridge.encoder.parameters():
             p.requires_grad = True
-        print("已解冻 nnunet_encoder，端到端训练 Vision+Bridge", flush=True)
+        print("宸茶В鍐?nnunet_encoder锛岀鍒扮璁粌 Vision+Bridge", flush=True)
         if getattr(args, "gradient_checkpointing", False):
             if _enable_encoder_gradient_checkpointing(vision_bridge.encoder):
-                print("已启用 encoder gradient checkpointing", flush=True)
+                print("宸插惎鐢?encoder gradient checkpointing", flush=True)
             else:
-                print("encoder 未提供原生 gradient checkpointing 接口，继续使用外层 checkpoint 包裹前向。", flush=True)
+                print("encoder has no native gradient-checkpointing API; keep outer checkpoint wrapper.", flush=True)
     trainable = [p for p in vision_bridge.parameters() if p.requires_grad]
-    trainable.extend(list(grade_head.parameters()))
+    if enable_cls_head:
+        trainable.extend(list(grade_head.parameters()))
     optimizer = torch.optim.AdamW(trainable, lr=args.lr)
-    scaler = GradScaler("cuda") if device.type == "cuda" else None
+    scaler = _build_grad_scaler(device)
 
-    # Mamba 冻结
-    print("加载 Mamba（冻结）...", flush=True)
+    # Mamba 鍐荤粨
+    print("鍔犺浇 Mamba锛堝喕缁擄級...", flush=True)
     from llm.mamba_loader import load_mamba_lm
     llm_model, tokenizer = load_mamba_lm(
         args.mamba_model,
@@ -398,8 +479,9 @@ def main() -> int:
     llm_device = next(llm_model.parameters()).device
     embed = llm_model.get_input_embeddings()
     d_model = llm_model.config.hidden_size
-    # 确保分级头与 LLM/视觉在同一设备上，避免 device mismatch
-    grade_head = grade_head.to(llm_device)
+    # 纭繚鍒嗙骇澶翠笌 LLM/瑙嗚鍦ㄥ悓涓€璁惧涓婏紝閬垮厤 device mismatch
+    if grade_head is not None:
+        grade_head = grade_head.to(llm_device)
     max_visual_tokens = getattr(args, "max_visual_tokens", 144)
     max_text_len = getattr(args, "max_text_len", DEFAULT_MAX_TEXT_LEN)
     _summarize_text_token_lengths(
@@ -409,14 +491,14 @@ def main() -> int:
         max_samples=getattr(args, "length_audit_samples", 0),
     )
 
-    print(f"max_visual_tokens={max_visual_tokens}（推理时须一致）", flush=True)
+    print(f"max_visual_tokens={max_visual_tokens}锛堟帹鐞嗘椂椤讳竴鑷达級", flush=True)
     print(f"max_text_len={max_text_len}, gradient_accumulation_steps={args.gradient_accumulation_steps}", flush=True)
     if device.type == "cuda":
         try:
             alloc_gb = torch.cuda.memory_allocated() / (1024 ** 3)
             reserved_gb = torch.cuda.memory_reserved() / (1024 ** 3)
             print(
-                f"当前 GPU 显存: 已分配 {alloc_gb:.2f} GB, 已预留 {reserved_gb:.2f} GB",
+                f"褰撳墠 GPU 鏄惧瓨: 宸插垎閰?{alloc_gb:.2f} GB, 宸查鐣?{reserved_gb:.2f} GB",
                 flush=True,
             )
         except Exception:
@@ -430,10 +512,12 @@ def main() -> int:
         "lr": args.lr,
         "max_text_len": max_text_len,
         "gradient_accumulation_steps": args.gradient_accumulation_steps,
+        "classifier_mode": "ordinal_bce",
+        "ordinal_bins": ordinal_bins,
     }
     (out_dir / "stage2_config.json").write_text(json.dumps(stage2_config, indent=2), encoding="utf-8")
 
-    # 日志
+    # 鏃ュ織
     log_csv = out_dir / "stage2_train_log.csv"
     heartbeat_path = out_dir / "stage2_heartbeat.txt"
     try:
@@ -442,18 +526,19 @@ def main() -> int:
         log_fh.flush()
     except OSError as e:
         log_fh = None
-        print(f"警告: 无法写日志 {log_csv}: {e}", flush=True)
+        print(f"璀﹀憡: 鏃犳硶鍐欐棩蹇?{log_csv}: {e}", flush=True)
 
     use_amp = device.type == "cuda" and scaler is not None
     use_grad_ckpt = getattr(args, "gradient_checkpointing", False)
     if use_grad_ckpt:
-        print("已启用 gradient_checkpointing（省显存）", flush=True)
+        print("gradient_checkpointing enabled", flush=True)
     global_step = 0
     epoch_avgs = []
     first_batch_done = False
     accum_steps = max(1, args.gradient_accumulation_steps)
+    grade_head_for_loss = grade_head if enable_cls_head else None
 
-    # 首 batch 前：确认 Loss 只对「回答」部分计算（便于排查幻觉/背诵问题）
+    # 棣?batch 鍓嶏細纭 Loss 鍙銆屽洖绛斻€嶉儴鍒嗚绠楋紙渚夸簬鎺掓煡骞昏/鑳岃闂锛?
     try:
         one = next(iter(train_loader))
         q0 = (one["question"] if isinstance(one["question"], str) else one["question"][0])
@@ -465,26 +550,26 @@ def main() -> int:
         prompt_len = q_enc["input_ids"].shape[1]
         answer_len = a_enc["input_ids"].shape[1]
         full_len = full_enc["input_ids"].shape[1]
-        print(f"[debug] 样本0: prompt(问题+换行) token 数={prompt_len}, answer token 数={answer_len}, full token 数={full_len}; Loss 仅对 answer 部分计算", flush=True)
-        # 打印训练文本格式，确认是 "question\\nanswer"。
-        print(f"[debug] 样本0训练文本预览: {sample_full[:280].replace(chr(10), ' | ')}", flush=True)
-        # 解码 full/answer 前若干 token，直观看模型在学什么格式。
+        print(f"[debug] 鏍锋湰0: prompt(闂+鎹㈣) token 鏁?{prompt_len}, answer token 鏁?{answer_len}, full token 鏁?{full_len}; Loss 浠呭 answer 閮ㄥ垎璁＄畻", flush=True)
+        # 鎵撳嵃璁粌鏂囨湰鏍煎紡锛岀‘璁ゆ槸 "question\\nanswer"銆?
+        print(f"[debug] 鏍锋湰0璁粌鏂囨湰棰勮: {sample_full[:280].replace(chr(10), ' | ')}", flush=True)
+        # 瑙ｇ爜 full/answer 鍓嶈嫢骞?token锛岀洿瑙傜湅妯″瀷鍦ㄥ浠€涔堟牸寮忋€?
         full_ids = full_enc["input_ids"][0]
         n_full = min(100, full_ids.size(0) if hasattr(full_ids, "size") else len(full_ids))
         full_decode = tokenizer.decode(
             full_ids[:n_full].tolist() if hasattr(full_ids, "tolist") else list(full_ids[:n_full]),
             skip_special_tokens=True,
         )
-        print(f"[debug] 样本0 full 前约100 token 解码: {full_decode[:240]}...", flush=True)
+        print(f"[debug] 鏍锋湰0 full 鍓嶇害100 token 瑙ｇ爜: {full_decode[:240]}...", flush=True)
         answer_ids = a_enc["input_ids"][0]
         n_show = min(60, answer_ids.size(0) if hasattr(answer_ids, "size") else len(answer_ids))
         head_decode = tokenizer.decode(
             answer_ids[:n_show].tolist() if hasattr(answer_ids, "tolist") else list(answer_ids[:n_show]),
             skip_special_tokens=True,
         )
-        print(f"[debug] 样本0 answer 部分前约60 token 解码: {head_decode[:200]}...", flush=True)
+        print(f"[debug] 鏍锋湰0 answer 閮ㄥ垎鍓嶇害60 token 瑙ｇ爜: {head_decode[:200]}...", flush=True)
     except Exception as e:
-        print(f"[debug] 首 batch 检查跳过: {e}", flush=True)
+        print(f"[debug] 棣?batch 妫€鏌ヨ烦杩? {e}", flush=True)
 
     for epoch in range(args.epochs):
         vision_bridge.train()
@@ -503,7 +588,7 @@ def main() -> int:
             if global_step % args.log_every_steps == 0:
                 print(f"epoch {epoch+1} step {global_step+1} start", flush=True)
             if use_amp:
-                with autocast("cuda", dtype=torch.float16):
+                with _autocast_ctx(device):
                     loss, cap_loss_val, cls_loss_val = compute_batch_loss(
                         batch,
                         vision_bridge,
@@ -516,8 +601,9 @@ def main() -> int:
                         max_text_len,
                         d_model,
                         use_gradient_checkpointing=use_grad_ckpt,
-                        grade_head=grade_head,
+                        grade_head=grade_head_for_loss,
                         class_weights=class_weights,
+                        lambda_cls=lambda_cls,
                     )
                 loss = loss / accum_steps
                 scaler.scale(loss).backward()
@@ -534,8 +620,9 @@ def main() -> int:
                     max_text_len,
                     d_model,
                     use_gradient_checkpointing=use_grad_ckpt,
-                    grade_head=grade_head,
+                    grade_head=grade_head_for_loss,
                     class_weights=class_weights,
+                    lambda_cls=lambda_cls,
                 )
                 loss = loss / accum_steps
                 loss.backward()
@@ -544,9 +631,9 @@ def main() -> int:
             if not first_batch_done:
                 first_batch_done = True
                 if loss_val < 0.1:
-                    print(f"警告: 首步 loss={loss_val:.4f} 异常低，请检查 label 是否只对回答部分", flush=True)
+                    print(f"璀﹀憡: 棣栨 loss={loss_val:.4f} 寮傚父浣庯紝璇锋鏌?label 鏄惁鍙鍥炵瓟閮ㄥ垎", flush=True)
                 elif loss_val > 15.0:
-                    print(f"提示: 首步 loss={loss_val:.4f} 较高属正常", flush=True)
+                    print(f"note: first-step loss={loss_val:.4f} is relatively high", flush=True)
 
             epoch_losses.append(loss_val)
             global_step += 1
@@ -580,12 +667,14 @@ def main() -> int:
                         "model_state_dict": vision_bridge.state_dict(),
                         "grade_head_state_dict": grade_head.state_dict(),
                         "num_grades": num_grades,
+                        "classifier_mode": "ordinal_bce",
+                        "ordinal_bins": ordinal_bins,
                     },
                     ckpt_path,
                 )
-                print(f"  [step {global_step}] 已保存 {ckpt_path}（含 grade_head）", flush=True)
+                print(f"  [step {global_step}] saved {ckpt_path} (with grade_head)", flush=True)
 
-        # epoch 末尾若有未 step 的累积梯度，补一次
+        # epoch 鏈熬鑻ユ湁鏈?step 鐨勭疮绉搴︼紝琛ヤ竴娆?
         if accum_steps > 1 and global_step % accum_steps != 0:
             if use_amp:
                 scaler.step(optimizer)
@@ -603,24 +692,28 @@ def main() -> int:
                 "model_state_dict": vision_bridge.state_dict(),
                 "grade_head_state_dict": grade_head.state_dict(),
                 "num_grades": num_grades,
+                        "classifier_mode": "ordinal_bce",
+                        "ordinal_bins": ordinal_bins,
             },
             ckpt_path,
         )
-        print(f"epoch {epoch+1} 结束, 平均 caption_loss {avg_loss:.4f}, 保存 {ckpt_path}（含 grade_head）", flush=True)
+        print(f"epoch {epoch+1} done, avg caption_loss {avg_loss:.4f}, saved {ckpt_path} (with grade_head)", flush=True)
 
     if log_fh is not None:
         try:
             log_fh.close()
         except OSError:
             pass
-    print("VLM 训练完成", flush=True)
+    print("VLM 璁粌瀹屾垚", flush=True)
     if epoch_avgs:
         recent = epoch_avgs[-5:] if len(epoch_avgs) >= 5 else epoch_avgs
-        print(f"最近 epoch 平均 loss: {[f'{x:.4f}' for x in recent]}", flush=True)
-        print(f"Loss 曲线: {log_csv}", flush=True)
+        print(f"鏈€杩?epoch 骞冲潎 loss: {[f'{x:.4f}' for x in recent]}", flush=True)
+        print(f"Loss 鏇茬嚎: {log_csv}", flush=True)
     return 0
 
 
 if __name__ == "__main__":
     sys.exit(main())
+
+
 
