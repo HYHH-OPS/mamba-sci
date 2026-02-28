@@ -101,19 +101,27 @@ PROMPT_SHORT_NO_PLACEHOLDERS = (
 
 # 鐢熸垚鍚庢埅鏂細閬囧埌骞垮憡/鐢佃瘽绛夐粦鍚嶅崟鍐呭鍗充涪寮冨悗缁紝鍑忓皯骞昏
 _BAD_PATTERNS = [
-    r"请拨打电话", r"联系客服", r"客服电话", r"微信联系", r"联系电话",
-    r"\+\s*\d{2}\s*[-]?\s*\d+", r"\d{11}", r"QQ\s*\d+",
-    r"鎮插墽鎯呭喌", r"鏁鍏虫敞", r"濡傞渶鏇村",
+    r"请拨打电话",
+    r"联系客服",
+    r"客服电话",
+    r"微信联系",
+    r"联系电话",
+    r"\+\s*\d{2}\s*[-]?\s*\d+",
+    r"\d{11}",
+    r"QQ\s*\d+",
+    r"敬请关注",
+    r"更多信息",
 ]
-# 绾暟瀛楀垪琛ㄥ够瑙夛紙濡?45, 46, 47, ...锛夛細鏁存涓㈠純鎴栨埅鏂?_NUMBER_LIST_PATTERN = re.compile(r"\d+\s*,\s*\d")
-# 鐢熸垚鏃惰嫢瑙ｇ爜缁撳熬宸叉槸銆屾暟瀛? 鏁板瓧, 鏁板瓧銆嶅垯鎻愬墠鍋滄锛岄伩鍏嶆暣娈甸兘鏄暟瀛楀簭鍒?_NUMBER_LIST_TAIL = re.compile(r"\d+\s*,\s*\d+\s*,\s*\d+\s*$")
-# 妯℃澘鍗犱綅绗﹁锛堜粎鍚?X锛?...> 鎴?<...>锛夛紝妯″瀷閲嶅 prompt 鏃朵骇鐢燂紝闇€杩囨护
+_NUMBER_LIST_PATTERN = re.compile(r"\d+\s*,\s*\d")
+_NUMBER_LIST_TAIL = re.compile(r"\d+\s*,\s*\d+\s*,\s*\d+\s*$")
 _PLACEHOLDER_LINE = re.compile(
-    r"^(?:\s*(?:鎵€瑙亅缁撹|寤鸿|鐥呯悊鍊惧悜|璇婃柇)[:锛歖\s*)?"
-    r"<[^>]*(?:鎵€瑙亅缁撹|寤鸿|鐥呯悊|闅忚|妫€鏌鐐庢€鑲跨槫|寰呭畾|寰佽薄|澶у皬|瀹氫綅|鏉＄粨)[^>]*>\s*$"
+    r"^(?:\s*(?:所见|结论|建议|病理倾向|诊断)[:：]\s*)?<[^>]+>\s*$"
 )
-# 鏁磋涓哄崟涓€ <...> 鐨勪篃瑙嗕负鍗犱綅绗?_ONLY_ANGLE_BRACKET = re.compile(r"^\s*<[^>]+>\s*$")
-# <...> 鍐呰嫢鍚湡瀹炴姤鍛婄壒寰侊紙鑲恒€佺粨鑺傘€乵m銆両M 绛夛級鍒欎繚鐣欒琛?_REAL_CONTENT_IN_BRACKETS = re.compile(r"<[^>]*(?:鑲簗缁撹妭|mm|IM\d|鑳稿粨|绾甸殧)[^>]*>")
+_ONLY_ANGLE_BRACKET = re.compile(r"^\s*<[^>]+>\s*$")
+_REAL_CONTENT_IN_BRACKETS = re.compile(
+    r"<[^>]*(?:肺|结节|mm|IM\d|胸膜|纵隔)[^>]*>",
+    re.IGNORECASE,
+)
 
 # 鍥涚骇鍒嗙骇鏍囩锛堥『搴忛渶涓庤缁冩椂涓€鑷达級
 GRADE_LABELS = ["AAH", "AIS", "MIA", "IAC"]
@@ -634,6 +642,15 @@ def main():
                 "mask_path": sample.get("mask_path"),
                 "prompt": prompt.strip(),
             }
+            # Keep GT grade for post-run evaluation if available.
+            gt_grade = sample.get("grade", -1)
+            try:
+                gt_grade = int(gt_grade)
+            except Exception:
+                gt_grade = -1
+            sample_meta["grade_gt"] = gt_grade
+            if 0 <= gt_grade < len(GRADE_LABELS):
+                sample_meta["grade_gt_label"] = GRADE_LABELS[gt_grade]
             grade_info = infer_grade_from_queries(vision_bridge)
             if grade_info is not None:
                 sample_meta["grade"] = grade_info
