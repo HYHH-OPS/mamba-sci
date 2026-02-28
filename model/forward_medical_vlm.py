@@ -122,11 +122,15 @@ def build_medical_vlm_from_config(config: dict) -> MedicalVLM:
     """Build MedicalVLM from config (e.g., config/paths.yaml)."""
     global_pool_size = config.get("global_pool_size", None)
     if global_pool_size is None:
-        global_pool_size = config.get("pool_size", 12)
+        global_pool_size = config.get("pool_size", None)
+    if global_pool_size is None:
+        global_pool_size = 8
 
     local_crop_size = config.get("local_crop_size", None)
     if local_crop_size is None:
-        local_crop_size = config.get("roi_side", 10)
+        local_crop_size = config.get("roi_side", None)
+    if local_crop_size is None:
+        local_crop_size = 10
 
     return MedicalVLM(
         encoder_checkpoint=config.get("nnunet_encoder_checkpoint"),
