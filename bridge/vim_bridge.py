@@ -1,18 +1,13 @@
 """
-Vim (Vision Mamba) Bridge: 2D 特征图 → 1D 序列 → Mamba 建模 → 视觉 token 序列。
-
-与 ARCHITECTURE.md 一致：将 nnU-Net 编码器输出的 [B, C, H, W] 展平为 [B, L, C]，
-经线性投影到 d_model 后通过 Vision Mamba Block（双向或单向），输出 [B, L, D] 供 LLM 融合。
+Vision Mamba bridge: sequence projection + (bi-)Mamba modeling + learnable queries.
 """
 
 from __future__ import annotations
 
-from typing import Optional
-
 import torch
 import torch.nn as nn
 
-# 可选：使用 mamba_ssm 的 Mamba 层
+# Optional: mamba_ssm backend
 try:
     from mamba_ssm.modules.mamba_simple import Mamba
     _HAS_MAMBA_SSM = True
@@ -22,9 +17,7 @@ except ImportError:
 
 
 class VimBlock(nn.Module):
-    """
-    单向前向 Mamba 块；若 mamba_ssm 不可用则退化为 Linear + LayerNorm。
-    """
+    """Single directional Mamba block with residual + LayerNorm."""
 
     def __init__(
         self,
@@ -34,7 +27,6 @@ class VimBlock(nn.Module):
         expand: int = 2,
     ):
         super().__init__()
-        self.d_model = d_model
         if _HAS_MAMBA_SSM and Mamba is not None:
             self.mamba = Mamba(d_model=d_model, d_state=d_state, d_conv=d_conv, expand=expand)
         else:
@@ -52,10 +44,8 @@ class VimBlock(nn.Module):
 
 class VimBridge(nn.Module):
     """
-    Vision Mamba 桥接器：2D feature map → 展平 → 投影 → 双向 Vim → 视觉 token 序列。
-
-    输入: [B, C, H, W]（如 C=512, H=W=28）
-    输出: [B, L, d_model]，L = H*W（如 28*28=784）
+    Bridge that consumes 1D visual sequence tokens [B, L, C]
+    and outputs projected/modelled visual tokens [B, L, d_model].
     """
 
     def __init__(
@@ -69,9 +59,9 @@ class VimBridge(nn.Module):
     ):
         super().__init__()
         self.proj = nn.Linear(in_channels, d_model)
-        self.d_model = d_model
-        self.bidirectional = bidirectional
         self.norm = nn.LayerNorm(d_model)
+        self.bidirectional = bidirectional
+
         self.vim_fwd = VimBlock(d_model=d_model, d_state=d_state, d_conv=d_conv, expand=expand)
         if bidirectional:
             self.vim_bwd = VimBlock(d_model=d_model, d_state=d_state, d_conv=d_conv, expand=expand)
@@ -79,25 +69,32 @@ class VimBridge(nn.Module):
         else:
             self.vim_bwd = None
             self.out_proj = nn.Identity()
-        # Learnable clinical queries（Q-Former 风格），用于侵润/风险分级等下游任务。
-        # 注意：Mamba 为序列模型，queries 放在图像 token 之后，保证在处理 queries 前已“看完”整幅图像。
+
+        # Learnable clinical queries (Q-Former style).
         self.num_queries = 32
         self.query_tokens = nn.Parameter(torch.randn(self.num_queries, d_model))
         self.latest_queries_out: torch.Tensor | None = None
 
-    def forward(self, feat_2d: torch.Tensor) -> torch.Tensor:
+    def forward(self, x_1d: torch.Tensor) -> torch.Tensor:
         """
-        feat_2d: [B, C, H, W]
-        return: [B, H*W, d_model]（仅返回图像 token，queries_out 可通过 self.latest_queries_out 访问）
+        Args:
+            x_1d: [B, L, C]
+        Returns:
+            tokens: [B, L, d_model]
         """
-        B, C, H, W = feat_2d.shape
-        # 按行展平为 1D 序列（Vim 做法）
-        x = feat_2d.flatten(2).permute(0, 2, 1)  # [B, L, C]
-        x = self.norm(self.proj(x))  # [B, L, d_model]
+        if x_1d.dim() != 3:
+            raise ValueError(f"VimBridge expects [B, L, C], got shape={tuple(x_1d.shape)}")
 
-        # 先图像 token，后 Query，符合 Mamba 序列依赖特性
-        B, L, D = x.shape
-        queries = self.query_tokens.unsqueeze(0).expand(B, -1, -1)  # [B, Q, D]
+        bsz, seq_len, c_in = x_1d.shape
+        if c_in != self.proj.in_features:
+            raise ValueError(
+                f"VimBridge input channel mismatch: got C={c_in}, expected {self.proj.in_features}"
+            )
+
+        x = self.norm(self.proj(x_1d))  # [B, L, D]
+
+        # Append learnable queries after image tokens.
+        queries = self.query_tokens.unsqueeze(0).expand(bsz, -1, -1)  # [B, Q, D]
         seq = torch.cat([x, queries], dim=1)  # [B, L+Q, D]
 
         if self.bidirectional:
@@ -108,8 +105,7 @@ class VimBridge(nn.Module):
         else:
             seq = self.vim_fwd(seq)
 
-        # 拆分图像 token 与 Query 表示
-        tokens = seq[:, :-self.num_queries, :]          # [B, L, D]
-        queries_out = seq[:, -self.num_queries:, :]     # [B, Q, D]
+        tokens = seq[:, :-self.num_queries, :]      # [B, L, D]
+        queries_out = seq[:, -self.num_queries:, :]  # [B, Q, D]
         self.latest_queries_out = queries_out
         return tokens

@@ -1,10 +1,10 @@
-﻿"""
+"""
 VLM 鍥惧儚鈫掓姤鍛婅缁冿細浠呰缁?Vision+Bridge锛孧amba 鍐荤粨銆?
 杈撳叆锛氶棶棰?鎶ュ憡锛汱oss 鍙銆屾姤鍛娿€嶉儴鍒嗚绠楋紝涓庢帹鐞嗘椂銆岄棶棰?鎹㈣銆嶅悗鐢熸垚鎶ュ憡涓€鑷淬€?
 
 鐢ㄦ硶:
-  python train_vlm.py --epochs 30 --batch_size 8 --lr 1e-5 --max_visual_tokens 144
-  python train_vlm.py --epochs 30 --batch_size 4 --lr 1e-5 --max_visual_tokens 144 --gradient_accumulation_steps 1
+  python train_vlm.py --epochs 30 --batch_size 8 --lr 1e-5 --max_visual_tokens 164
+  python train_vlm.py --epochs 30 --batch_size 4 --lr 1e-5 --max_visual_tokens 164 --gradient_accumulation_steps 1
 """
 
 from __future__ import annotations
@@ -315,7 +315,12 @@ def main() -> int:
     parser.add_argument("--epochs", type=int, default=30, help="Training epochs")
     parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--lr", type=float, default=1e-5, help="瀛︿範鐜囷紱绔埌绔В鍐绘椂寤鸿 1e-5")
-    parser.add_argument("--max_visual_tokens", type=int, default=144, help="Max visual tokens after pooling (e.g. 12x12=144)")
+    parser.add_argument(
+        "--max_visual_tokens",
+        type=int,
+        default=164,
+        help="Max visual tokens after dual-stream fusion (Global 8x8=64 + Local 10x10=100 => 164)",
+    )
     parser.add_argument("--max_text_len", type=int, default=DEFAULT_MAX_TEXT_LEN, help="闂+鎶ュ憡鎬?token 涓婇檺")
     parser.add_argument("--gradient_accumulation_steps", type=int, default=1, help="姊害绱Н姝ユ暟")
     parser.add_argument("--save_every_steps", type=int, default=0, help="Save an extra checkpoint every N steps; 0 means only save at epoch end")
@@ -348,7 +353,8 @@ def main() -> int:
         return 1
 
     train_ds = MedicalVLMDataset(csv_train, prompt_json_file=config.get("caption_prompt_json"))
-    # 渚垫鼎/鍒嗙骇绫诲埆鏁帮紙AAH/AIS/MIA/IAC锛?    num_grades = 4
+    # Classification classes: AAH/AIS/MIA/IAC
+    num_grades = 4
     # 鏍规嵁鏁版嵁鍒嗗竷浼拌绫诲埆鏉冮噸锛岀紦瑙ｇ被鍒笉骞宠　锛涜嫢鏃?grade 鍒楀垯涓?None
     class_weights = None
     valid_grade_count = 0
@@ -482,7 +488,7 @@ def main() -> int:
     # 纭繚鍒嗙骇澶翠笌 LLM/瑙嗚鍦ㄥ悓涓€璁惧涓婏紝閬垮厤 device mismatch
     if grade_head is not None:
         grade_head = grade_head.to(llm_device)
-    max_visual_tokens = getattr(args, "max_visual_tokens", 144)
+    max_visual_tokens = getattr(args, "max_visual_tokens", 164)
     max_text_len = getattr(args, "max_text_len", DEFAULT_MAX_TEXT_LEN)
     _summarize_text_token_lengths(
         train_ds,
