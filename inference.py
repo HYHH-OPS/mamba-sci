@@ -96,7 +96,7 @@ class _NumberListStoppingCriteria(StoppingCriteria if StoppingCriteria else obje
 
 # 鏃犲崰浣嶇鐨勭煭 prompt锛岄伩鍏嶆ā鍨嬮噸澶嶃€屽缓璁細<闅忚鎴栨鏌ュ缓璁?銆嶇瓑妯℃澘鍐呭鑰岄潪鐢熸垚鐪熷疄鎶ュ憡
 PROMPT_SHORT_NO_PLACEHOLDERS = (
-    "璇锋牴鎹兏閮–T鐢熸垚鎶ュ憡锛屾寜鍥涙杈撳嚭锛氭墍瑙併€佺粨璁恒€佸缓璁€佺梾鐞嗗€惧悜銆俓n"
+    "Please generate a chest CT report with 4 sections: Findings, Conclusion, Recommendation, Pathologic Tendency.\n"
 )
 
 # 鐢熸垚鍚庢埅鏂細閬囧埌骞垮憡/鐢佃瘽绛夐粦鍚嶅崟鍐呭鍗充涪寮冨悗缁紝鍑忓皯骞昏
@@ -422,6 +422,7 @@ def generate_from_image(
 
     # Tokenize prompt and build text embeddings.
     enc = tokenizer(
+        prompt,
         return_tensors="pt",
         padding=False,
         truncation=True,
