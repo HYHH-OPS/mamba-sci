@@ -20,7 +20,7 @@ def main() -> int:
     )
     ap.add_argument("--image", required=True, help="CT NIfTI 路径")
     ap.add_argument("--mask", default=None, help="结节分割 mask NIfTI 路径；不传则提示使用一键流程")
-    ap.add_argument("--output_dir", default="D:/mamba-res/nodules", help="输出目录")
+    ap.add_argument("--output_dir", default="/root/autodl-tmp/mamba-res/nodules", help="输出目录")
     ap.add_argument("--line_width", type=float, default=1.8)
     ap.add_argument("--fill_alpha", type=float, default=0.22)
     args = ap.parse_args()

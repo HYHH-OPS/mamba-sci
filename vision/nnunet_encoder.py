@@ -29,6 +29,8 @@ except ImportError:
 # 2D 默认 plans 与 Dataset503 一致（8 stages, 512 patch）
 DEFAULT_2D_FEATURES = [32, 64, 128, 256, 512, 512, 512, 512]
 DEFAULT_2D_STRIDES = [[1, 1], [2, 2], [2, 2], [2, 2], [2, 2], [2, 2], [2, 2], [2, 2]]
+DEFAULT_3D_FEATURES = [24, 48, 96, 192, 256]
+DEFAULT_3D_STRIDES = [(1, 2, 2), (1, 2, 2), (2, 2, 2), (2, 2, 2), (1, 2, 2)]
 
 
 def _get_stage_spatial_size(input_size: int, strides_per_stage: list[list[int]]) -> list[int]:
@@ -108,6 +110,48 @@ class NNUnetEncoderLight(nn.Module):
         return self._spatial_sizes[self.output_stage_index + 1]
 
 
+class NNUnetEncoder3D(nn.Module):
+    """
+    Lightweight 3D nnU-Net-like encoder.
+    Input:  [B, 1, D, H, W]
+    Output: [B, C, Df, Hf, Wf]
+    """
+
+    def __init__(
+        self,
+        in_channels: int = 1,
+        features_per_stage: list[int] | None = None,
+        strides_per_stage: list[tuple[int, int, int]] | None = None,
+        output_stage_index: int = 4,
+    ):
+        super().__init__()
+        features = features_per_stage or DEFAULT_3D_FEATURES
+        strides = strides_per_stage or DEFAULT_3D_STRIDES
+        max_stage = min(output_stage_index + 1, len(features), len(strides))
+
+        self.stages = nn.ModuleList()
+        ch_in = in_channels
+        for i in range(max_stage):
+            ch_out = int(features[i])
+            s = tuple(int(v) for v in strides[i])
+            block = nn.Sequential(
+                nn.Conv3d(ch_in, ch_out, kernel_size=3, stride=s, padding=1, bias=True),
+                nn.InstanceNorm3d(ch_out, eps=1e-5, affine=True),
+                nn.LeakyReLU(inplace=True),
+                nn.Conv3d(ch_out, ch_out, kernel_size=3, stride=1, padding=1, bias=True),
+                nn.InstanceNorm3d(ch_out, eps=1e-5, affine=True),
+                nn.LeakyReLU(inplace=True),
+            )
+            self.stages.append(block)
+            ch_in = ch_out
+        self.out_channels = ch_in
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        for stage in self.stages:
+            x = stage(x)
+        return x
+
+
 def build_nnunet_encoder_light(
     checkpoint_path: Optional[str | Path] = None,
     output_stage_index: int = 4,
@@ -158,3 +202,16 @@ def build_nnunet_encoder_light(
             if loaded:
                 model.load_state_dict(loaded, strict=strict)
     return model
+
+
+def build_nnunet_encoder_3d(
+    output_stage_index: int = 4,
+    in_channels: int = 1,
+) -> NNUnetEncoder3D:
+    """
+    Build 3D encoder for true 3D patches.
+    """
+    return NNUnetEncoder3D(
+        in_channels=in_channels,
+        output_stage_index=output_stage_index,
+    )

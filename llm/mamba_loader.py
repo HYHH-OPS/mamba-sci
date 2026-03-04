@@ -121,12 +121,25 @@ def load_mamba_lm(
         # 兼容 HuggingFace/Transformers 的离线开关
         local_files_only = os.getenv("HF_HUB_OFFLINE", "0") == "1" or os.getenv("TRANSFORMERS_OFFLINE", "0") == "1"
 
-    tokenizer = AutoTokenizer.from_pretrained(
-        model_name_or_path,
-        cache_dir=str(cache_dir) if cache_dir else None,
-        trust_remote_code=True,
-        local_files_only=local_files_only,
-    )
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(
+            model_name_or_path,
+            cache_dir=str(cache_dir) if cache_dir else None,
+            trust_remote_code=True,
+            local_files_only=local_files_only,
+        )
+    except Exception as e:
+        if "ModelWrapper" in str(e) or "untagged enum" in str(e) or "tokenizer" in str(e).lower():
+            print(f"Fast tokenizer 加载失败，改用 use_fast=False: {e}", flush=True)
+            tokenizer = AutoTokenizer.from_pretrained(
+                model_name_or_path,
+                cache_dir=str(cache_dir) if cache_dir else None,
+                trust_remote_code=True,
+                local_files_only=local_files_only,
+                use_fast=False,
+            )
+        else:
+            raise
     load_kw = dict(
         device_map=device_map,
         cache_dir=str(cache_dir) if cache_dir else None,

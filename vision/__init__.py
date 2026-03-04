@@ -8,6 +8,8 @@ from typing import Any
 __all__ = [
     "NNUnetEncoderLight",
     "build_nnunet_encoder_light",
+    "NNUnetEncoder3D",
+    "build_nnunet_encoder_3d",
     "compute_nodule_stats",
     "find_best_slice",
     "generate_nodule_contour_outputs",
@@ -18,12 +20,19 @@ __all__ = [
 
 
 def __getattr__(name: str) -> Any:
-    if name in {"NNUnetEncoderLight", "build_nnunet_encoder_light"}:
-        from .nnunet_encoder import NNUnetEncoderLight, build_nnunet_encoder_light
+    if name in {"NNUnetEncoderLight", "build_nnunet_encoder_light", "NNUnetEncoder3D", "build_nnunet_encoder_3d"}:
+        from .nnunet_encoder import (
+            NNUnetEncoderLight,
+            build_nnunet_encoder_light,
+            NNUnetEncoder3D,
+            build_nnunet_encoder_3d,
+        )
 
         return {
             "NNUnetEncoderLight": NNUnetEncoderLight,
             "build_nnunet_encoder_light": build_nnunet_encoder_light,
+            "NNUnetEncoder3D": NNUnetEncoder3D,
+            "build_nnunet_encoder_3d": build_nnunet_encoder_3d,
         }[name]
 
     if name in {

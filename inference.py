@@ -126,6 +126,26 @@ _REAL_CONTENT_IN_BRACKETS = re.compile(
 # 鍥涚骇鍒嗙骇鏍囩锛堥『搴忛渶涓庤缁冩椂涓€鑷达級
 GRADE_LABELS = ["AAH", "AIS", "MIA", "IAC"]
 
+
+def _as_tuple3(v, default=(32, 128, 128)):
+    if v is None:
+        return tuple(default)
+    if isinstance(v, str):
+        parts = [p.strip() for p in v.split(",") if p.strip()]
+        if len(parts) == 3:
+            try:
+                return (int(parts[0]), int(parts[1]), int(parts[2]))
+            except Exception:
+                return tuple(default)
+        return tuple(default)
+    try:
+        vals = tuple(int(x) for x in v)
+        if len(vals) == 3:
+            return vals
+    except Exception:
+        pass
+    return tuple(default)
+
 def _drop_placeholder_lines(text: str) -> str:
     """Drop placeholder-only lines while keeping real report content."""
     if not text or not text.strip():
@@ -395,6 +415,8 @@ def generate_from_image(
     force_template: bool = True,
     raw_out: list | None = None,
     debug_vision: bool = False,
+    roi_center: torch.Tensor | None = None,
+    roi_center_3d: torch.Tensor | None = None,
 ) -> str:
     """Generate report text from one image tensor and prompt."""
     if prompt is None:
@@ -404,9 +426,13 @@ def generate_from_image(
     if device is None:
         device = next(vision_bridge.parameters()).device
     image_tensor = image_tensor.to(device)
+    if roi_center is not None:
+        roi_center = torch.as_tensor(roi_center, device=device, dtype=torch.float32)
+    if roi_center_3d is not None:
+        roi_center_3d = torch.as_tensor(roi_center_3d, device=device, dtype=torch.float32)
     vision_bridge.eval()
     with torch.inference_mode():
-        visual_tokens = vision_bridge(image_tensor)  # [1, L_vis, D]
+        visual_tokens = vision_bridge(image_tensor, roi_center=roi_center, roi_center_3d=roi_center_3d)  # [1, L_vis, D]
     visual_tokens = _pool_visual_tokens(visual_tokens, max_visual_tokens)
     if debug_vision:
         v = visual_tokens.detach().float()
@@ -557,7 +583,12 @@ def main():
     parser.add_argument("--do_sample", action="store_true", help="鍚敤閲囨牱鐢熸垚锛堝彲鑳芥洿鍙戞暎锛岄粯璁ゅ叧闂級")
     parser.add_argument("--no_do_sample", action="store_true", help="Disable sampling and use greedy decode")
     parser.add_argument("--temperature", type=float, default=0.6, help="閲囨牱娓╁害锛屼粎 do_sample 鏃舵湁鏁堬紝榛樿 0.6")
+    parser.add_argument("--top_p", type=float, default=0.85, help="Top-p nucleus sampling threshold when do_sample is enabled")
     parser.add_argument("--repetition_penalty", type=float, default=1.2, help="閲嶅鎯╃綒锛屽噺杞婚噸澶嶈瘝锛岄粯璁?1.2")
+    parser.add_argument("--csv", type=str, default=None, help="Override validation CSV for --val_sample")
+    parser.add_argument("--ablation_mode", type=str, default=None, choices=["full", "global_only", "local_only"], help="Override ablation mode at inference time")
+    parser.add_argument("--roi_jitter_3d", type=int, default=0, help="Apply random voxel jitter to roi_center_3d during --val_sample")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed used for roi jitter")
     parser.add_argument("--out_dir", type=str, default="D:/mamba-res", help="鐢熸垚鎶ュ憡钀界洏鐩綍锛岄粯璁?D:/mamba-res")
     args = parser.parse_args()
     args.do_sample = bool(args.do_sample)
@@ -572,6 +603,10 @@ def main():
     config.setdefault("use_cmi", False)
     config.setdefault("roi_side", None)
     config.setdefault("cmi_compress_to", None)
+    if args.ablation_mode:
+        config["ablation_mode"] = str(args.ablation_mode)
+    if args.csv:
+        config["caption_csv_val"] = str(args.csv)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     out_dir = REPO / "outputs"
@@ -606,16 +641,31 @@ def main():
 
     if args.val_sample:
         from data.medical_vlm_dataset import MedicalVLMDataset
-        csv_val = config.get("caption_csv_val")
+        csv_val = args.csv or config.get("caption_csv_val")
         if not csv_val or not Path(csv_val).exists():
             print("楠岃瘉闆?CSV 涓嶅瓨鍦紝鏃犳硶 --val_sample")
             return 1
-        val_ds = MedicalVLMDataset(csv_val, prompt_json_file=config.get("caption_prompt_json"))
+        if getattr(args, "roi_jitter_3d", 0) > 0:
+            torch.manual_seed(int(getattr(args, "seed", 42)))
+            np.random.seed(int(getattr(args, "seed", 42)))
+        val_ds = MedicalVLMDataset(
+            csv_val,
+            prompt_json_file=config.get("caption_prompt_json"),
+            spatial_dims=int(config.get("spatial_dims", 2)),
+            patch_size_3d=_as_tuple3(config.get("patch_size_3d", (32, 128, 128))),
+        )
         num = min(args.num_val, len(val_ds))
         meta_list = []
         for idx in range(num):
             sample = val_ds[idx]
             image_t = sample["image"].unsqueeze(0)
+            roi_center = sample.get("roi_center")
+            roi_center_3d = sample.get("roi_center_3d")
+            if isinstance(roi_center_3d, torch.Tensor) and getattr(args, "roi_jitter_3d", 0) > 0:
+                jit = int(args.roi_jitter_3d)
+                if roi_center_3d.numel() >= 3 and float(roi_center_3d.min().item()) >= 0:
+                    delta = torch.randint(low=-jit, high=jit + 1, size=(3,), dtype=torch.int64).to(roi_center_3d.dtype)
+                    roi_center_3d = roi_center_3d + delta
             answer_gt = sample["answer"]
             if getattr(args, "use_csv_prompt", False):
                 prompt = sample.get("question") or PROMPT_SHORT_NO_PLACEHOLDERS
@@ -626,12 +676,14 @@ def main():
             gen = generate_from_image(
                 image_t, vision_bridge, llm_model, tokenizer, prompt=prompt,
                 max_new_tokens=args.max_new_tokens, device=device, max_visual_tokens=args.max_visual_tokens,
-                do_sample=args.do_sample, temperature=args.temperature, repetition_penalty=args.repetition_penalty,
+                do_sample=args.do_sample, temperature=args.temperature, top_p=args.top_p, repetition_penalty=args.repetition_penalty,
                 length_penalty=getattr(args, "length_penalty", 1.1),
                 no_repeat_ngram_size=getattr(args, "no_repeat_ngram_size", 0),
                 suppress_eos_steps=getattr(args, "suppress_eos_steps", 128),
                 num_beams=getattr(args, "num_beams", 1),
                 force_words_ids=force_words_ids,
+                roi_center=roi_center,
+                roi_center_3d=roi_center_3d,
             )
             print(f"鐢熸垚: {gen[:500]}...")
             print(f"鍙傝€? {answer_gt[:200]}...")
@@ -691,7 +743,7 @@ def main():
     text = generate_from_image(
         image_t, vision_bridge, llm_model, tokenizer,
         max_new_tokens=args.max_new_tokens, device=device, max_visual_tokens=args.max_visual_tokens,
-        do_sample=args.do_sample, temperature=args.temperature, repetition_penalty=args.repetition_penalty,
+        do_sample=args.do_sample, temperature=args.temperature, top_p=args.top_p, repetition_penalty=args.repetition_penalty,
         length_penalty=getattr(args, "length_penalty", 1.1),
         no_repeat_ngram_size=getattr(args, "no_repeat_ngram_size", 0),
         suppress_eos_steps=getattr(args, "suppress_eos_steps", 128),

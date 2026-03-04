@@ -1,39 +1,22 @@
-# nnU-Net 与医学 VLM 相关路径（Windows）
-# 可根据环境用环境变量覆盖，例如: NNUNET_PREPROCESSED, NNUNET_RESULTS
-
-# 2D 预处理: d:/nnunet_preprocessed/Dataset503_TBLesion_327/nnUNetPlans_2d/
-# 3D 预处理: d:/nnunet_preprocessed/Dataset503_TBLesion_327/nnUNetPlans_3d_fullres/
-nnunet_raw: "d:/nnunet_raw"
-nnunet_preprocessed: "d:/nnunet_preprocessed"
-nnunet_results: "d:/nnunet_results"
-nnunet_data: "d:/nnunet_data"
-
-# 当前使用的 nnU-Net 数据集与配置
-nnunet_dataset_id: "Dataset503_TBLesion_327"
-nnunet_plans_2d: "nnUNetPlans_2d"
-nnunet_trainer: "nnUNetTrainer__nnUNetPlans__2d"
-nnunet_fold: 0
-
-# 编码器 checkpoint（2D 最佳权重）
-nnunet_encoder_checkpoint: "d:/nnunet_results/Dataset503_TBLesion_327/nnUNetTrainer__nnUNetPlans__2d/fold_0/checkpoint_best.pth"
-
-# RadFM 风格 CSV / 病例文档（此处改为使用你刚刚从总表生成的 caption CSV）
-caption_csv_train: "d:/mamba/outputs/private_caption_aligned/caption_train_with_mask.csv"
-caption_csv_val: "d:/mamba/outputs/private_caption_aligned/caption_val_with_mask.csv"
-caption_prompt_json: "d:/unn-net/radfm_caption_prompt.json"
-# 多轮对话格式（可选）
-instruction_data_327: "d:/unn-net/radfm_instruction_data_327.json"
-instruction_data: "d:/unn-net/radfm_instruction_data.json"
-
-# Mamba LLM 预训练
-mamba_hf_model: "state-spaces/mamba-2.8b-hf"
-
-# 论文方案（可选）：关闭可大幅降显存，避免 OOM；开启后显存易翻倍
-use_cmi: false           # CMI 极度耗显存，Windows 下建议 false
-cmi_compress_to: null     # 关闭 CMI 时无效
-roi_side: null           # null 时用默认特征图尺寸（如 12x12/14x14）
-cmi_d_state: 64          # 仅 use_cmi 时有效
-
-# VLM pooling: reduce encoder 2D feature map to 12x12 before Vim to reduce token load/hallucination.
-use_pooling: true
-pool_size: 12
+nnunet_raw: /root/autodl-tmp/datasets/nnUNet_raw
+nnunet_preprocessed: /root/autodl-tmp/datasets/preprocessed
+nnunet_results: /root/autodl-tmp/datasets/nnunet_results
+nnunet_data: /root/autodl-tmp/datasets
+caption_csv_train: /autodl-tmp/caption_train_private_v5_ord_all_clean.csv
+caption_csv_val: /autodl-tmp/caption_val_private_v5_ord_all_clean.csv
+caption_csv_val_public_kits19: /autodl-tmp/caption_val_linux.csv
+caption_prompt_json: null
+nnunet_encoder_checkpoint: null
+mamba_hf_model: /autodl-tmp/models/mamba-2.8b-hf
+global_pool_size_3d:
+- 4
+- 4
+- 4
+local_crop_size_3d:
+- 2
+- 5
+- 10
+patch_size_3d:
+- 32
+- 128
+- 128

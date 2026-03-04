@@ -10,7 +10,7 @@
 
 用法：
   python scripts/ct_full_pipeline.py --image "D:/path/to/new_ct.nii.gz"
-  python scripts/ct_full_pipeline.py --image "D:/path/to/ct.nii.gz" --output_dir "D:/mamba-res/full_out" --skip_segment --mask "已有mask.nii.gz"
+  python scripts/ct_full_pipeline.py --image "/path/to/ct.nii.gz" --output_dir "/root/autodl-tmp/mamba-res/full_out" --skip_segment --mask "已有mask.nii.gz"
 """
 from __future__ import annotations
 
@@ -32,7 +32,7 @@ def _abs_no_resolve(p: str | Path) -> Path:
 def main() -> int:
     ap = argparse.ArgumentParser(description="新 CT → 分割+勾画 → 报告 → 侵润倾向占位")
     ap.add_argument("--image", required=True, help="新 CT 的 NIfTI 路径")
-    ap.add_argument("--output_dir", default="D:/mamba-res/full_pipeline", help="输出目录（所有结果落在此目录）")
+    ap.add_argument("--output_dir", default="/root/autodl-tmp/mamba-res/full_pipeline", help="输出目录（所有结果落在此目录）")
     ap.add_argument("--skip_segment", action="store_true", help="跳过分割+勾画，仅做报告+侵润占位（需同时提供 --mask 或该目录下已有 predicted_mask.nii.gz）")
     ap.add_argument("--mask", default=None, help="已有 mask；与 --skip_segment 一起使用时跳过 nnU-Net 预测")
     ap.add_argument("--checkpoint", default=None, help="VLM checkpoint，默认 outputs/vision_bridge_vlm_final.pt")

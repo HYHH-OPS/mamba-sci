@@ -1,0 +1,28 @@
+% 编译：xelatex paper_with_figures_main.tex
+% 在 docs 目录下执行，以便正确找到 figures/ 下的图片
+% 若您已有主文档，只需将本文件中的“五、实验与结果”部分
+% （即 \input{paper_section_experiments} 或该 section 的完整内容）
+% 插入到您主文档中“四、针对已有工作的改进与对比实验建议”之后、参考文献之前。
+\documentclass[11pt]{article}
+\usepackage[UTF8,scheme=plain,fontset=none]{ctex}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{array}
+\usepackage{hyperref}
+\hypersetup{colorlinks=true,linkcolor=blue,urlcolor=blue,citecolor=blue}
+\setlength{\parindent}{0pt}
+
+\begin{document}
+
+\section*{四、针对已有工作的改进与对比实验建议}
+（此处保留您原文“四、……”的完整内容；此处仅占位。）
+
+\clearpage
+% ========== 图表插入位置：下方为“五、实验设置与结果” ==========
+\input{paper_section_experiments}
+% ========== 若 \input 报错，请将 paper_section_experiments.tex 的正文全部粘贴到此处 ==========
+
+\end{document}

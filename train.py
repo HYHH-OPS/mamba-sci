@@ -44,8 +44,9 @@ def main():
     parser.add_argument("--lr", type=float, default=1e-5, help="Stage 1 建议 1e-5；过大(如 1e-4)+小数据易使 proxy loss 趋近 0，视觉特征退化，不宜作 Stage 2 初始化")
     parser.add_argument("--patch_size", type=int, default=512)
     parser.add_argument("--num_workers", type=int, default=0)
-    parser.add_argument("--output_dir", type=str, default=None)
+    parser.add_argument("--output_dir", type=str, default="/root/autodl-tmp/mamba-res/train_outputs", help="训练产物目录，默认 /root/autodl-tmp/mamba-res/train_outputs")
     parser.add_argument("--save_every", type=int, default=500)
+    parser.add_argument("--no_wandb", action="store_true", help="禁用 WandB 记录")
     args = parser.parse_args()
 
     config = get_config()
@@ -91,8 +92,35 @@ def main():
     def proxy_loss(visual_tokens: torch.Tensor) -> torch.Tensor:
         return visual_tokens.pow(2).mean()
 
-    out_dir = Path(args.output_dir or str(REPO / "outputs"))
+    out_dir = Path(args.output_dir or "/root/autodl-tmp/mamba-res/train_outputs")
     out_dir.mkdir(parents=True, exist_ok=True)
+    train_config = {"epochs": args.epochs, "batch_size": args.batch_size, "lr": args.lr, "output_dir": str(out_dir)}
+    use_wandb = False
+    wandb_run_info_path = out_dir / "wandb_run_info.json"
+    if not getattr(args, "no_wandb", False):
+        import os
+        wandb_key = os.environ.get("WANDB_API_KEY", "").strip()
+        if len(wandb_key) < 40:
+            wandb_key = ""
+        if not wandb_key:
+            for key_file in [out_dir / ".wandb_key", out_dir.parent / ".wandb_key", Path("/root/autodl-tmp/mamba-res/.wandb_key")]:
+                if key_file.exists():
+                    try:
+                        wandb_key = key_file.read_text(encoding="utf-8").strip().split("\n")[0].strip()
+                        if len(wandb_key) >= 40:
+                            break
+                        wandb_key = ""
+                    except Exception:
+                        pass
+        if wandb_key and len(wandb_key) >= 40:
+            try:
+                import wandb
+                os.environ["WANDB_API_KEY"] = wandb_key
+                wandb.init(project="mamba-sci-vlm", name=out_dir.name or "stage1", config=train_config)
+                use_wandb = True
+                print("WandB 已启用。", flush=True)
+            except Exception as e:
+                print(f"WandB 初始化失败: {e}", flush=True)
     print(f"训练样本: {len(train_ds)}，验证: {len(val_ds) if val_ds else 0}，device: {device}", flush=True)
     print(f"输出目录: {out_dir}", flush=True)
     print("指标: 每 10 step 打印 train_loss；每 epoch 结束打印 val_loss（若有验证集）", flush=True)
@@ -118,6 +146,15 @@ def main():
             epoch_count += 1
             if global_step == 1 or global_step % 10 == 0:
                 print(f"epoch {epoch+1} step {global_step} train_loss {loss.item():.6f}", flush=True)
+                if use_wandb:
+                    try:
+                        import wandb
+                        log_d = {"train/loss": loss.item(), "train/epoch": epoch + 1, "step": global_step, "train/lr": opt.param_groups[0]["lr"]}
+                        if device.type == "cuda":
+                            log_d["system/gpu_alloc_gb"] = torch.cuda.memory_allocated(device) / (1024 ** 3)
+                        wandb.log(log_d, step=global_step)
+                    except Exception:
+                        pass
             if args.save_every and global_step % args.save_every == 0:
                 ckpt = out_dir / f"vision_bridge_step{global_step}.pt"
                 torch.save({"step": global_step, "model_state_dict": model.state_dict(), "optimizer_state_dict": opt.state_dict()}, ckpt)
@@ -142,6 +179,12 @@ def main():
             val_loss = val_loss_sum / max(val_count, 1)
             model.train()
             print(f"epoch {epoch+1} 结束 | train_loss_avg {train_avg:.6f} | val_loss {val_loss:.6f}", flush=True)
+            if use_wandb:
+                try:
+                    import wandb
+                    wandb.log({"train/epoch_avg_loss": train_avg, "val/loss": val_loss, "train/epoch": epoch + 1, "step": global_step}, step=global_step)
+                except Exception:
+                    pass
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
                 ckpt_best = out_dir / "vision_bridge_best_val.pt"
@@ -149,7 +192,22 @@ def main():
                 print(f"  [best] 保存 best val: {ckpt_best}", flush=True)
         else:
             print(f"epoch {epoch+1} 结束 | train_loss_avg {train_avg:.6f}", flush=True)
+            if use_wandb:
+                try:
+                    import wandb
+                    wandb.log({"train/epoch_avg_loss": train_avg, "train/epoch": epoch + 1, "step": global_step}, step=global_step)
+                except Exception:
+                    pass
 
+    if use_wandb:
+        try:
+            import wandb
+            run_info = {"run_id": wandb.run.id, "run_url": wandb.run.get_url(), "project": wandb.run.project, "name": wandb.run.name, "config": train_config}
+            wandb_run_info_path.write_text(__import__("json").dumps(run_info, indent=2, ensure_ascii=False), encoding="utf-8")
+            print(f"WandB 运行信息已保存: {wandb_run_info_path}", flush=True)
+            wandb.finish()
+        except Exception as e:
+            print(f"WandB 收尾失败: {e}", flush=True)
     ckpt_final = out_dir / "vision_bridge_final.pt"
     torch.save({"step": global_step, "model_state_dict": model.state_dict()}, ckpt_final)
     print(f"训练完成，保存: {ckpt_final}", flush=True)

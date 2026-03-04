@@ -5,7 +5,7 @@ Usage (必须使用真实存在的文件路径，不能使用占位符 xxx):
   python scripts/nodule_overlay_and_stats.py ^
     --image "D:/nnunet_raw/Dataset503_TBLesion_327/imagesTr/0000719802_20260124_0000.nii.gz" ^
     --mask "D:/nnunet_raw/Dataset503_TBLesion_327/labelsTr/0000719802_20260124.nii.gz" ^
-    --output_dir "D:/mamba-res/nodules"
+    --output_dir "/root/autodl-tmp/mamba-res/nodules"
 
 路径可从 caption CSV 的 image_path / mask_path 列获取，或从 nnunet_raw/.../imagesTr 与 labelsTr 中选取。
 """
@@ -34,7 +34,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="Nodule contour overlay + nodule stats")
     ap.add_argument("--image", required=True, help="CT NIfTI 路径（需真实存在，勿用占位符 xxx）")
     ap.add_argument("--mask", required=True, help="分割 mask NIfTI 路径（需真实存在）")
-    ap.add_argument("--output_dir", default="D:/mamba-res/nodules", help="Output directory")
+    ap.add_argument("--output_dir", default="/root/autodl-tmp/mamba-res/nodules", help="Output directory")
     ap.add_argument("--line_width", type=float, default=1.8, help="Contour line width")
     ap.add_argument("--fill_alpha", type=float, default=0.22, help="Overlay fill alpha")
     args = ap.parse_args()

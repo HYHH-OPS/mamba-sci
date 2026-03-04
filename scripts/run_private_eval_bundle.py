@@ -51,11 +51,13 @@ def _safe_read(path: Path) -> str:
 
 
 def _check_sections(text: str) -> dict[str, bool]:
+    t = text or ""
+    low = t.lower()
     return {
-        "has_所见": "所见" in text,
-        "has_结论": "结论" in text,
-        "has_建议": "建议" in text,
-        "has_病理倾向": "病理倾向" in text,
+        "has_所见": ("所见" in t) or ("findings" in low) or ("finding" in low),
+        "has_结论": ("结论" in t) or ("印象" in t) or ("conclusion" in low) or ("impression" in low),
+        "has_建议": ("建议" in t) or ("recommendation" in low) or ("advice" in low) or ("follow-up" in low) or ("follow up" in low),
+        "has_病理倾向": ("病理倾向" in t) or ("病理" in t) or ("pathologic tendency" in low) or ("pathology tendency" in low),
     }
 
 
@@ -346,7 +348,11 @@ def main() -> int:
     parser.add_argument("--max_new_tokens", type=int, default=512)
     parser.add_argument("--num_beams", type=int, default=4)
     parser.add_argument("--length_penalty", type=float, default=1.1)
+    parser.add_argument("--repetition_penalty", type=float, default=1.0)
     parser.add_argument("--no_repeat_ngram_size", type=int, default=0)
+    parser.add_argument("--do_sample", action="store_true", help="Enable sampling decode (default: greedy)")
+    parser.add_argument("--temperature", type=float, default=0.1)
+    parser.add_argument("--top_p", type=float, default=0.95)
     parser.add_argument("--suppress_eos_steps", type=int, default=128)
     parser.add_argument("--constrained_decode", action="store_true")
     parser.add_argument("--draw_nodule_contour", action="store_true")
@@ -383,11 +389,21 @@ def main() -> int:
             str(args.num_beams),
             "--length_penalty",
             str(args.length_penalty),
+            "--repetition_penalty",
+            str(args.repetition_penalty),
             "--no_repeat_ngram_size",
             str(args.no_repeat_ngram_size),
             "--suppress_eos_steps",
             str(args.suppress_eos_steps),
         ]
+        if args.do_sample:
+            cmd += [
+                "--do_sample",
+                "--temperature",
+                str(args.temperature),
+                "--top_p",
+                str(args.top_p),
+            ]
         if args.checkpoint:
             cmd += ["--checkpoint", args.checkpoint]
         if args.constrained_decode:

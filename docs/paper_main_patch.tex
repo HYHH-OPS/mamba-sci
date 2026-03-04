@@ -1,0 +1,41 @@
+% ============================================================
+% 主文档修改说明：将“五、实验设置与结果”接入您的主 .tex
+% ============================================================
+%
+% 【步骤 1】在导言区（\begin{document} 之前）确保有：
+%   \usepackage{graphicx}
+% 您已有，无需改。
+%
+% 【步骤 2】若主 .tex 与 figures 不在同一目录，在 \begin{document} 后加一行：
+%   \graphicspath{{./figures/}{./}}
+% 这样 \includegraphics{figures/xxx.png} 可简写为 \includegraphics{xxx.png}；
+% 若主 .tex 在 docs/ 下、图在 docs/figures/ 下，则用：
+%   \graphicspath{{./figures/}}
+% 此时正文里写 \includegraphics[width=0.85\linewidth]{train_loss_curve.png} 即可。
+%
+% 【步骤 3】在“四、针对已有工作的改进与对比实验建议”整节之后、
+% “参考文献”之前，插入实验部分。二选一：
+%
+% 方式 A：主 .tex 与 paper_section_experiments.tex 同目录（例如都在 docs/）
+%   \input{paper_section_experiments}
+%
+% 方式 B：直接粘贴 paper_section_experiments.tex 的正文内容（从
+%   \section*{五、实验设置与结果...} 到该文件末尾）到主文档对应位置。
+%
+% 【步骤 4】图表文件位置（已为您复制到 docs/figures/）：
+%   docs/figures/train_loss_curve.png
+%   docs/figures/length_curve.png
+%   docs/figures/structure_coverage.png
+%   docs/figures/grade_confusion.png
+%
+% 若您的主 .tex 不在 docs/ 而在别处，请把 docs/figures/ 下的 4 张图
+% 复制到您主 .tex 所在目录的 figures/ 子目录，并在主文档中设置
+% \graphicspath{{figures/}} 或保持 \includegraphics{figures/xxx.png}。
+%
+% 【图表插入顺序】正文中依次出现：
+%   表 1：tab:exp-summary（汇总指标）
+%   图 1：fig:train-loss     train_loss_curve.png
+%   图 2：fig:length-curve   length_curve.png
+%   图 3：fig:structure-coverage  structure_coverage.png
+%   图 4：fig:grade-confusion    grade_confusion.png
+% ============================================================

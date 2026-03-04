@@ -10,7 +10,7 @@
 
 用法：
   python scripts/ct_to_detection_and_contour.py --image "D:/path/to/new_ct.nii.gz"
-  python scripts/ct_to_detection_and_contour.py --image "D:/path/to/ct.nii.gz" --output_dir "D:/mamba-res/nodules/my_case"
+  python scripts/ct_to_detection_and_contour.py --image "/path/to/ct.nii.gz" --output_dir "/root/autodl-tmp/mamba-res/nodules/my_case"
   python scripts/ct_to_detection_and_contour.py --image "..." --skip_nnunet --mask "已有mask.nii.gz"   # 仅勾画，不预测
 """
 from __future__ import annotations
@@ -31,10 +31,6 @@ if str(REPO) not in sys.path:
 DEFAULT_NNUNET_TASK_ID = 503
 DEFAULT_NNUNET_CONFIG = "2d"
 DEFAULT_FOLD = 0
-
-
-def _abs_no_resolve(p: str | Path) -> Path:
-    return Path(os.path.abspath(str(Path(p).expanduser())))
 
 
 def _load_config() -> dict:
@@ -104,7 +100,7 @@ def main() -> int:
         description="新 CT → nnU-Net 分割 → 结节轮廓勾画与统计（一键流程）"
     )
     ap.add_argument("--image", required=True, help="新 CT 的 NIfTI 路径（.nii 或 .nii.gz）")
-    ap.add_argument("--output_dir", default="D:/mamba-res/nodules", help="输出目录（叠加图、结节统计、预测 mask 均在此）")
+    ap.add_argument("--output_dir", default="/root/autodl-tmp/mamba-res/nodules", help="输出目录（叠加图、结节统计、预测 mask 均在此）")
     ap.add_argument("--task_id", type=int, default=DEFAULT_NNUNET_TASK_ID, help=f"nnU-Net 任务 ID，默认 {DEFAULT_NNUNET_TASK_ID}（Dataset503）")
     ap.add_argument("--config", default=DEFAULT_NNUNET_CONFIG, help=f"nnU-Net 配置，默认 {DEFAULT_NNUNET_CONFIG}")
     ap.add_argument("--fold", type=int, default=DEFAULT_FOLD, help="使用的 fold，默认 0")
@@ -115,12 +111,12 @@ def main() -> int:
     ap.add_argument("--keep_pred", action="store_true", help="保留 nnUNetv2 的临时预测目录（便于调试）")
     args = ap.parse_args()
 
-    image_path = _abs_no_resolve(args.image)
+    image_path = Path(args.image).expanduser().resolve()
     if not image_path.is_file():
         print("错误: 图像文件不存在:", image_path, file=sys.stderr)
         return 1
 
-    out_dir = _abs_no_resolve(args.output_dir)
+    out_dir = Path(args.output_dir).expanduser().resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
 
     mask_path: Path | None = None
@@ -129,7 +125,7 @@ def main() -> int:
         if not args.mask:
             print("错误: --skip_nnunet 时必须提供 --mask（已有 mask 路径）", file=sys.stderr)
             return 1
-        mask_path = _abs_no_resolve(args.mask)
+        mask_path = Path(args.mask).expanduser().resolve()
         if not mask_path.is_file():
             print("错误: Mask 文件不存在:", mask_path, file=sys.stderr)
             return 1
